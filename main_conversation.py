@@ -2,12 +2,19 @@
 """  
 main.py  
 -------  
-Example script to run the RAG system with caching demonstration.  
+RAG system with multi-LLM support (Azure OpenAI, Gemini, OpenAI).  
 """  
   
 import os  
 import sys  
 import time  
+import logging  
+  
+# Enable logging  
+logging.basicConfig(  
+    level=logging.INFO,  
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'  
+)  
   
 # Ensure project root is in path  
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  
@@ -16,10 +23,9 @@ from src.orchestrator import RAGOrchestrator
 from config.config import Config  
   
   
-def main(PDF_PATH: str):  
-    # Initialize  
+def main(PDF_PATH: str = ""):  
     print("=" * 60)  
-    print("RAG System with Caching")  
+    print("RAG System with Multi-LLM Support")  
     print("=" * 60)  
       
     print("\nInitializing RAG system...")  
@@ -29,12 +35,23 @@ def main(PDF_PATH: str):
     validation = config.validate()  
     if not validation["valid"]:  
         print(f"Configuration issues: {validation['issues']}")  
-        print("Please check your environment variables.")  
+        print("Please check your .env file.")  
         return  
+      
+    # Show provider info  
+    print(f"\n✓ LLM Provider: {validation['provider'].upper()}")  
+      
+    llm_config = config.get_llm_config()  
+    if validation['provider'] == 'azure':  
+        print(f"  Deployment: {llm_config.get('azure_deployment')}")  
+    elif validation['provider'] == 'gemini':  
+        print(f"  Model: {llm_config.get('model_name')}")  
+    elif validation['provider'] == 'openai':  
+        print(f"  Model: {llm_config.get('model_name')}")  
       
     # Create orchestrator  
     rag = RAGOrchestrator(config)  
-    print("RAG system initialized successfully!")  
+    print("✓ RAG system initialized successfully!")  
       
     # Show current stats  
     stats = rag.get_stats()  
@@ -47,7 +64,7 @@ def main(PDF_PATH: str):
     print(f"\nCreated conversation: {conversation_id[:8]}...")  
       
     # Process a PDF  
-    pdf_path = PDF_PATH  
+    pdf_path = PDF_PATH 
       
     if pdf_path and os.path.exists(pdf_path):  
         print(f"\nProcessing {pdf_path}...")  
@@ -68,7 +85,6 @@ def main(PDF_PATH: str):
                 print(f"  Added to index: {doc_info.get('added_to_index', doc_info['chunks'])}")  
                 print(f"  Time: {elapsed:.2f}s")  
               
-            # Show updated stats  
             stats = rag.get_stats()  
             print(f"\nUpdated stats:")  
             print(f"  - Indexed documents: {stats['vector_store'].get('indexed_documents', 0)}")  
@@ -81,8 +97,6 @@ def main(PDF_PATH: str):
         return  
     else:  
         print("Skipping PDF upload.")  
-          
-        # Check if there are existing documents  
         stats = rag.get_stats()  
         if stats['vector_store'].get('total_vectors', 0) == 0:  
             print("Note: No documents indexed. Queries won't return results.")  
@@ -90,7 +104,8 @@ def main(PDF_PATH: str):
     # Interactive query loop  
     print("\n" + "=" * 60)  
     print("RAG Chat Interface")  
-    print("Commands: 'quit', 'stats', 'clear', 'reprocess'")  
+    print(f"Using: {validation['provider'].upper()}")  
+    print("Commands: 'quit', 'stats', 'clear', 'reprocess', 'switch'")  
     print("=" * 60 + "\n")  
       
     while True:  
@@ -106,7 +121,9 @@ def main(PDF_PATH: str):
               
             if query.lower() == 'stats':  
                 stats = rag.get_stats()  
+                model_info = rag.llm_generator.get_model_info()  
                 print(f"\nStats:")  
+                print(f"  - Provider: {model_info.get('provider')}")  
                 print(f"  - Indexed documents: {stats['vector_store'].get('indexed_documents', 0)}")  
                 print(f"  - Total vectors: {stats['vector_store'].get('total_vectors', 0)}")  
                 print(f"  - Conversations: {stats['conversations']}")  
@@ -130,7 +147,18 @@ def main(PDF_PATH: str):
                     )  
                     print(f"Result: {result}")  
                 else:  
-                    print("No PDF path set. Enter a path first.")  
+                    print("No PDF path set.")  
+                continue  
+              
+            if query.lower() == 'switch':  
+                print("\nAvailable providers:")  
+                print("  1. azure  - Azure OpenAI")  
+                print("  2. gemini - Google Gemini")  
+                print("  3. openai - OpenAI")  
+                choice = input("Enter provider name: ").strip().lower()  
+                if choice in ('azure', 'gemini', 'openai'):  
+                    print(f"\nTo switch providers, update LLM_PROVIDER in .env to '{choice}'")  
+                    print("Then restart the application.")  
                 continue  
               
             # Process query  
@@ -141,7 +169,9 @@ def main(PDF_PATH: str):
                 conversation_id=conversation_id,  
                 query=query,  
                 use_reranking=True,  
-                use_memory=True  
+                use_memory=True,  
+                top_k=10,  
+                rerank_top_k=5  
             )  
               
             elapsed = time.time() - start_time  
@@ -157,8 +187,8 @@ def main(PDF_PATH: str):
                         for i, source in enumerate(response["sources"], 1):  
                             score = source.get("score", 0)  
                             page = source.get("metadata", {}).get("page_number", "?")  
-                            content_preview = source.get("content", "")[:100]  
-                            print(f"  [{i}] Page {page} (score: {score:.3f})")  
+                            content_preview = source.get("content", "")[:150]  
+                            print(f"\n  [{i}] Page {page} (score: {score:.3f})")  
                             print(f"      {content_preview}...")  
                 print()  
             else:  
@@ -169,6 +199,8 @@ def main(PDF_PATH: str):
             break  
         except Exception as e:  
             print(f"Error: {e}\n")  
+            import traceback  
+            traceback.print_exc()  
   
   
 if __name__ == "__main__": 

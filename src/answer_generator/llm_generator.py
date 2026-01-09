@@ -639,53 +639,54 @@
 """  
 src/answer_generator/llm_generator.py  
 -------------------------------------  
-LLM-based answer generation using Azure OpenAI.  
+Multi-provider LLM generator supporting Azure OpenAI, Gemini, and OpenAI.  
 """  
   
 import logging  
-from typing import List, Dict, Any, Optional  
+from typing import List, Dict, Any, Optional, Generator  
+from abc import ABC, abstractmethod  
   
 logger = logging.getLogger(__name__)  
   
   
-class LLMGenerator:  
-    """  
-    LLM-based answer generator using Azure OpenAI.  
+class BaseLLM(ABC):  
+    """Abstract base class for LLM providers."""  
       
-    Features:  
-    - Azure OpenAI integration  
-    - Streaming support  
-    - Token counting  
-    - Error handling with retries  
-    """  
+    @abstractmethod  
+    def generate(self, prompt: str) -> str:  
+        """Generate a response for the given prompt."""  
+        pass  
       
-    def __init__(self, config=None):  
+    @abstractmethod  
+    def generate_with_messages(self, messages: List[Dict[str, str]]) -> str:  
+        """Generate a response using a list of messages."""  
+        pass  
+      
+    def generate_stream(self, prompt: str) -> Generator[str, None, None]:  
+        """Generate a streaming response (optional)."""  
+        yield self.generate(prompt)  
+  
+  
+class AzureOpenAILLM(BaseLLM):  
+    """Azure OpenAI LLM implementation."""  
+      
+    def __init__(self, config: Dict[str, Any]):  
         """  
-        Initialize the LLM generator.  
+        Initialize Azure OpenAI LLM.  
           
         Args:  
-            config: Configuration object  
+            config: Configuration dict with Azure settings  
         """  
-        from config.config import Config  
+        self.api_key = config.get("api_key")  
+        self.azure_endpoint = config.get("azure_endpoint")  
+        self.api_version = config.get("api_version", "2024-02-15-preview")  
+        self.deployment_name = config.get("azure_deployment")  
+        self.temperature = config.get("temperature", 0.0)  
+        self.max_tokens = config.get("max_tokens", 2000)  
           
-        self.config = config or Config()  
-          
-        # Azure OpenAI settings  
-        azure_config = self.config.get_azure_openai_config()  
-          
-        self.api_key = azure_config.get("api_key")  
-        self.azure_endpoint = azure_config.get("azure_endpoint")  
-        self.api_version = azure_config.get("api_version", "2024-02-15-preview")  
-        self.deployment_name = azure_config.get("azure_deployment")  
-          
-        # Generation settings  
-        self.temperature = getattr(self.config, "LLM_TEMPERATURE", 0.0)  
-        self.max_tokens = getattr(self.config, "LLM_MAX_TOKENS", 2000)  
-          
-        # Lazy load LLM  
         self._llm = None  
           
-        logger.info(f"LLMGenerator initialized with deployment: {self.deployment_name}")  
+        logger.info(f"AzureOpenAILLM initialized with deployment: {self.deployment_name}")  
       
     @property  
     def llm(self):  
@@ -699,15 +700,6 @@ class LLMGenerator:
         try:  
             from langchain_openai import AzureChatOpenAI  
               
-            if not self.api_key:  
-                raise ValueError("AZURE_OPENAI_API_KEY not set")  
-            if not self.azure_endpoint:  
-                raise ValueError("AZURE_OPENAI_ENDPOINT not set")  
-            if not self.deployment_name:  
-                raise ValueError("AZURE_OPENAI_DEPLOYMENT_NAME not set")  
-              
-            logger.info(f"Loading Azure OpenAI LLM: {self.deployment_name}")  
-              
             self._llm = AzureChatOpenAI(  
                 azure_endpoint=self.azure_endpoint,  
                 api_key=self.api_key,  
@@ -720,12 +712,445 @@ class LLMGenerator:
             logger.info("Azure OpenAI LLM loaded successfully")  
               
         except ImportError:  
-            logger.error("langchain-openai not installed")  
-            logger.error("Install with: pip install langchain-openai")  
+            logger.error("langchain-openai not installed. Install with: pip install langchain-openai")  
             raise  
+      
+    def generate(self, prompt: str) -> str:  
+        """Generate a response."""  
+        from langchain_core.messages import HumanMessage  
+          
+        messages = [HumanMessage(content=prompt)]  
+        response = self.llm.invoke(messages)  
+          
+        return response.content if hasattr(response, "content") else str(response)  
+      
+    def generate_with_messages(self, messages: List[Dict[str, str]]) -> str:  
+        """Generate a response using messages."""  
+        from langchain_core.messages import HumanMessage, AIMessage, SystemMessage  
+          
+        lc_messages = []  
+        for msg in messages:  
+            role = msg.get("role", "user").lower()  
+            content = msg.get("content", "")  
+              
+            if role == "system":  
+                lc_messages.append(SystemMessage(content=content))  
+            elif role in ("assistant", "ai"):  
+                lc_messages.append(AIMessage(content=content))  
+            else:  
+                lc_messages.append(HumanMessage(content=content))  
+          
+        response = self.llm.invoke(lc_messages)  
+        return response.content if hasattr(response, "content") else str(response)  
+      
+    def generate_stream(self, prompt: str) -> Generator[str, None, None]:  
+        """Generate streaming response."""  
+        from langchain_core.messages import HumanMessage  
+          
+        messages = [HumanMessage(content=prompt)]  
+          
+        for chunk in self.llm.stream(messages):  
+            if hasattr(chunk, "content"):  
+                yield chunk.content  
+  
+  
+class GeminiLLM(BaseLLM):  
+    """  
+    Google Gemini LLM implementation.  
+      
+    Supports both:  
+    - New: google-genai package (recommended)  
+    - Legacy: google-generativeai package (deprecated)  
+    """  
+      
+    def __init__(self, config: Dict[str, Any]):  
+        """  
+        Initialize Gemini LLM.  
+          
+        Args:  
+            config: Configuration dict with Gemini settings  
+        """  
+        self.api_key = config.get("api_key")  
+        self.model_name = config.get("model_name", "gemini-2.5-flash")  
+        self.temperature = config.get("temperature", 0.0)  
+        self.max_tokens = config.get("max_tokens", 2000)  
+          
+        self._client = None  
+        self._model = None  
+        self._use_new_sdk = True  # Try new SDK first  
+          
+        logger.info(f"GeminiLLM initialized with model: {self.model_name}")  
+      
+    @property  
+    def model(self):  
+        """Lazy load the model."""  
+        if self._model is None and self._client is None:  
+            self._load_model()  
+        return self._model or self._client  
+      
+    def _load_model(self):  
+        """Load the Gemini model using the appropriate SDK."""  
+        # Try new google-genai package first  
+        try:  
+            self._load_new_sdk()  
+            self._use_new_sdk = True  
+            logger.info("Using new google-genai SDK")  
+            return  
+        except ImportError:  
+            logger.info("google-genai not found, trying legacy SDK")  
         except Exception as e:  
-            logger.error(f"Failed to load Azure OpenAI LLM: {e}")  
+            logger.warning(f"New SDK failed: {e}, trying legacy SDK")  
+          
+        # Fall back to legacy google-generativeai package  
+        try:  
+            self._load_legacy_sdk()  
+            self._use_new_sdk = False  
+            logger.info("Using legacy google-generativeai SDK (deprecated)")  
+            return  
+        except ImportError:  
+            logger.error(  
+                "Neither google-genai nor google-generativeai is installed.\n"  
+                "Install with: pip install google-genai"  
+            )  
             raise  
+      
+    def _load_new_sdk(self):  
+        """Load using the new google-genai package."""  
+        from google import genai  
+        from google.genai import types  
+          
+        # Create client  
+        self._client = genai.Client(api_key=self.api_key)  
+          
+        # Store config for generation  
+        self._generation_config = types.GenerateContentConfig(  
+            temperature=self.temperature,  
+            max_output_tokens=self.max_tokens,  
+        )  
+          
+        logger.info(f"Gemini client initialized with model: {self.model_name}")  
+      
+    def _load_legacy_sdk(self):  
+        """Load using the legacy google-generativeai package."""  
+        import warnings  
+          
+        # Suppress the deprecation warning since we're handling it  
+        with warnings.catch_warnings():  
+            warnings.filterwarnings("ignore", category=FutureWarning)  
+            import google.generativeai as genai  
+          
+        # Configure API key  
+        genai.configure(api_key=self.api_key)  
+          
+        # Create model with generation config  
+        generation_config = genai.GenerationConfig(  
+            temperature=self.temperature,  
+            max_output_tokens=self.max_tokens,  
+        )  
+          
+        self._model = genai.GenerativeModel(  
+            model_name=self.model_name,  
+            generation_config=generation_config  
+        )  
+          
+        logger.info(f"Gemini model loaded (legacy): {self.model_name}")  
+      
+    def generate(self, prompt: str) -> str:  
+        """Generate a response."""  
+        # Ensure model is loaded  
+        _ = self.model  
+          
+        try:  
+            if self._use_new_sdk:  
+                return self._generate_new_sdk(prompt)  
+            else:  
+                return self._generate_legacy_sdk(prompt)  
+        except Exception as e:  
+            logger.error(f"Gemini generation failed: {e}")  
+            raise  
+      
+    def _generate_new_sdk(self, prompt: str) -> str:  
+        """Generate using new SDK."""  
+        from google.genai import types  
+          
+        response = self._client.models.generate_content(  
+            model=self.model_name,  
+            contents=prompt,  
+            config=self._generation_config  
+        )  
+          
+        # Extract text from response  
+        if hasattr(response, "text"):  
+            return response.text  
+        elif hasattr(response, "candidates") and response.candidates:  
+            candidate = response.candidates[0]  
+            if hasattr(candidate, "content") and candidate.content.parts:  
+                return candidate.content.parts[0].text  
+          
+        return str(response)  
+      
+    def _generate_legacy_sdk(self, prompt: str) -> str:  
+        """Generate using legacy SDK."""  
+        response = self._model.generate_content(prompt)  
+          
+        if hasattr(response, "text"):  
+            return response.text  
+        elif hasattr(response, "parts"):  
+            return "".join(part.text for part in response.parts)  
+          
+        return str(response)  
+      
+    def generate_with_messages(self, messages: List[Dict[str, str]]) -> str:  
+        """Generate a response using messages."""  
+        # Ensure model is loaded  
+        _ = self.model  
+          
+        try:  
+            if self._use_new_sdk:  
+                return self._generate_with_messages_new_sdk(messages)  
+            else:  
+                return self._generate_with_messages_legacy_sdk(messages)  
+        except Exception as e:  
+            logger.error(f"Gemini chat generation failed: {e}")  
+            # Fallback to simple generation  
+            full_prompt = self._messages_to_prompt(messages)  
+            return self.generate(full_prompt)  
+      
+    def _generate_with_messages_new_sdk(self, messages: List[Dict[str, str]]) -> str:  
+        """Generate with messages using new SDK."""  
+        from google.genai import types  
+          
+        # Convert messages to Gemini format  
+        contents = []  
+        for msg in messages:  
+            role = msg.get("role", "user").lower()  
+            content = msg.get("content", "")  
+              
+            # Map roles  
+            if role in ("user", "human"):  
+                gemini_role = "user"  
+            elif role in ("assistant", "ai", "model"):  
+                gemini_role = "model"  
+            else:  
+                gemini_role = "user"  
+              
+            contents.append(types.Content(  
+                role=gemini_role,  
+                parts=[types.Part(text=content)]  
+            ))  
+          
+        response = self._client.models.generate_content(  
+            model=self.model_name,  
+            contents=contents,  
+            config=self._generation_config  
+        )  
+          
+        if hasattr(response, "text"):  
+            return response.text  
+        elif hasattr(response, "candidates") and response.candidates:  
+            candidate = response.candidates[0]  
+            if hasattr(candidate, "content") and candidate.content.parts:  
+                return candidate.content.parts[0].text  
+          
+        return str(response)  
+      
+    def _generate_with_messages_legacy_sdk(self, messages: List[Dict[str, str]]) -> str:  
+        """Generate with messages using legacy SDK."""  
+        # Convert to chat format  
+        history = []  
+        for msg in messages[:-1]:  
+            role = msg.get("role", "user").lower()  
+            content = msg.get("content", "")  
+              
+            if role in ("user", "human"):  
+                history.append({"role": "user", "parts": [content]})  
+            elif role in ("assistant", "ai", "model"):  
+                history.append({"role": "model", "parts": [content]})  
+          
+        # Start chat with history  
+        chat = self._model.start_chat(history=history)  
+          
+        # Send last message  
+        if messages:  
+            last_content = messages[-1].get("content", "")  
+            response = chat.send_message(last_content)  
+            return response.text if hasattr(response, "text") else str(response)  
+          
+        return ""  
+      
+    def _messages_to_prompt(self, messages: List[Dict[str, str]]) -> str:  
+        """Convert messages to a single prompt string."""  
+        parts = []  
+        for msg in messages:  
+            role = msg.get("role", "user").upper()  
+            content = msg.get("content", "")  
+            parts.append(f"{role}: {content}")  
+        return "\n\n".join(parts)  
+      
+    def generate_stream(self, prompt: str) -> Generator[str, None, None]:  
+        """Generate streaming response."""  
+        # Ensure model is loaded  
+        _ = self.model  
+          
+        try:  
+            if self._use_new_sdk:  
+                yield from self._generate_stream_new_sdk(prompt)  
+            else:  
+                yield from self._generate_stream_legacy_sdk(prompt)  
+        except Exception as e:  
+            logger.error(f"Gemini streaming failed: {e}")  
+            yield self.generate(prompt)  
+      
+    def _generate_stream_new_sdk(self, prompt: str) -> Generator[str, None, None]:  
+        """Stream using new SDK."""  
+        response = self._client.models.generate_content_stream(  
+            model=self.model_name,  
+            contents=prompt,  
+            config=self._generation_config  
+        )  
+          
+        for chunk in response:  
+            if hasattr(chunk, "text"):  
+                yield chunk.text  
+            elif hasattr(chunk, "candidates") and chunk.candidates:  
+                candidate = chunk.candidates[0]  
+                if hasattr(candidate, "content") and candidate.content.parts:  
+                    yield candidate.content.parts[0].text  
+      
+    def _generate_stream_legacy_sdk(self, prompt: str) -> Generator[str, None, None]:  
+        """Stream using legacy SDK."""  
+        response = self._model.generate_content(prompt, stream=True)  
+          
+        for chunk in response:  
+            if hasattr(chunk, "text"):  
+                yield chunk.text  
+            elif hasattr(chunk, "parts"):  
+                for part in chunk.parts:  
+                    yield part.text  
+  
+  
+class OpenAILLM(BaseLLM):  
+    """OpenAI LLM implementation (direct, not Azure)."""  
+      
+    def __init__(self, config: Dict[str, Any]):  
+        """  
+        Initialize OpenAI LLM.  
+          
+        Args:  
+            config: Configuration dict with OpenAI settings  
+        """  
+        self.api_key = config.get("api_key")  
+        self.model_name = config.get("model_name", "gpt-4")  
+        self.temperature = config.get("temperature", 0.0)  
+        self.max_tokens = config.get("max_tokens", 2000)  
+          
+        self._llm = None  
+          
+        logger.info(f"OpenAILLM initialized with model: {self.model_name}")  
+      
+    @property  
+    def llm(self):  
+        """Lazy load the LLM."""  
+        if self._llm is None:  
+            self._load_llm()  
+        return self._llm  
+      
+    def _load_llm(self):  
+        """Load the OpenAI LLM."""  
+        try:  
+            from langchain_openai import ChatOpenAI  
+              
+            self._llm = ChatOpenAI(  
+                api_key=self.api_key,  
+                model=self.model_name,  
+                temperature=self.temperature,  
+                max_tokens=self.max_tokens  
+            )  
+              
+            logger.info("OpenAI LLM loaded successfully")  
+              
+        except ImportError:  
+            logger.error("langchain-openai not installed. Install with: pip install langchain-openai")  
+            raise  
+      
+    def generate(self, prompt: str) -> str:  
+        """Generate a response."""  
+        from langchain_core.messages import HumanMessage  
+          
+        messages = [HumanMessage(content=prompt)]  
+        response = self.llm.invoke(messages)  
+          
+        return response.content if hasattr(response, "content") else str(response)  
+      
+    def generate_with_messages(self, messages: List[Dict[str, str]]) -> str:  
+        """Generate a response using messages."""  
+        from langchain_core.messages import HumanMessage, AIMessage, SystemMessage  
+          
+        lc_messages = []  
+        for msg in messages:  
+            role = msg.get("role", "user").lower()  
+            content = msg.get("content", "")  
+              
+            if role == "system":  
+                lc_messages.append(SystemMessage(content=content))  
+            elif role in ("assistant", "ai"):  
+                lc_messages.append(AIMessage(content=content))  
+            else:  
+                lc_messages.append(HumanMessage(content=content))  
+          
+        response = self.llm.invoke(lc_messages)  
+        return response.content if hasattr(response, "content") else str(response)  
+  
+  
+class LLMGenerator:  
+    """  
+    Multi-provider LLM generator.  
+      
+    Factory class that creates the appropriate LLM based on configuration.  
+    """  
+      
+    def __init__(self, config=None):  
+        """  
+        Initialize the LLM generator.  
+          
+        Args:  
+            config: Configuration object  
+        """  
+        from config.config import Config  
+          
+        self.config = config or Config()  
+          
+        # Get LLM configuration  
+        self.llm_config = self.config.get_llm_config()  
+        self.provider = self.llm_config.get("provider", "azure")  
+          
+        # Lazy load LLM  
+        self._llm: Optional[BaseLLM] = None  
+          
+        logger.info(f"LLMGenerator initialized with provider: {self.provider}")  
+      
+    @property  
+    def llm(self) -> BaseLLM:  
+        """Lazy load the appropriate LLM."""  
+        if self._llm is None:  
+            self._llm = self._create_llm()  
+        return self._llm  
+      
+    def _create_llm(self) -> BaseLLM:  
+        """Create the appropriate LLM based on provider."""  
+        provider = self.provider  
+          
+        if provider == "azure":  
+            return AzureOpenAILLM(self.llm_config)  
+        elif provider == "gemini":  
+            return GeminiLLM(self.llm_config)  
+        elif provider == "openai":  
+            return OpenAILLM(self.llm_config)  
+        else:  
+            raise ValueError(  
+                f"Unknown LLM provider: {provider}. "  
+                "Supported providers: azure, gemini, openai"  
+            )  
       
     def generate(self, prompt: str) -> str:  
         """  
@@ -742,30 +1167,12 @@ class LLMGenerator:
             return ""  
           
         try:  
-            from langchain_core.messages import HumanMessage  
-              
-            # Create message  
-            messages = [HumanMessage(content=prompt)]  
-              
-            # Generate response  
-            response = self.llm.invoke(messages)  
-              
-            # Extract content  
-            if hasattr(response, "content"):  
-                return response.content  
-            elif isinstance(response, str):  
-                return response  
-            else:  
-                return str(response)  
-                  
+            return self.llm.generate(prompt)  
         except Exception as e:  
             logger.error(f"LLM generation failed: {e}")  
             raise  
       
-    def generate_with_messages(  
-        self,   
-        messages: List[Dict[str, str]]  
-    ) -> str:  
+    def generate_with_messages(self, messages: List[Dict[str, str]]) -> str:  
         """  
         Generate a response using a list of messages.  
           
@@ -780,43 +1187,14 @@ class LLMGenerator:
             return ""  
           
         try:  
-            from langchain_core.messages import (  
-                HumanMessage,   
-                AIMessage,   
-                SystemMessage  
-            )  
-              
-            # Convert to LangChain messages  
-            lc_messages = []  
-            for msg in messages:  
-                role = msg.get("role", "user").lower()  
-                content = msg.get("content", "")  
-                  
-                if role == "system":  
-                    lc_messages.append(SystemMessage(content=content))  
-                elif role == "assistant" or role == "ai":  
-                    lc_messages.append(AIMessage(content=content))  
-                else:  # user or default  
-                    lc_messages.append(HumanMessage(content=content))  
-              
-            # Generate response  
-            response = self.llm.invoke(lc_messages)  
-              
-            # Extract content  
-            if hasattr(response, "content"):  
-                return response.content  
-            elif isinstance(response, str):  
-                return response  
-            else:  
-                return str(response)  
-                  
+            return self.llm.generate_with_messages(messages)  
         except Exception as e:  
             logger.error(f"LLM generation with messages failed: {e}")  
             raise  
       
-    def generate_stream(self, prompt: str):  
+    def generate_stream(self, prompt: str) -> Generator[str, None, None]:  
         """  
-        Generate a streaming response for the given prompt.  
+        Generate a streaming response.  
           
         Args:  
             prompt: The input prompt  
@@ -825,21 +1203,10 @@ class LLMGenerator:
             Response chunks  
         """  
         if not prompt or not prompt.strip():  
-            logger.warning("Empty prompt provided")  
             return  
           
         try:  
-            from langchain_core.messages import HumanMessage  
-              
-            messages = [HumanMessage(content=prompt)]  
-              
-            # Stream response  
-            for chunk in self.llm.stream(messages):  
-                if hasattr(chunk, "content"):  
-                    yield chunk.content  
-                elif isinstance(chunk, str):  
-                    yield chunk  
-                      
+            yield from self.llm.generate_stream(prompt)  
         except Exception as e:  
             logger.error(f"LLM streaming failed: {e}")  
             raise  
@@ -856,18 +1223,10 @@ class LLMGenerator:
         """  
         try:  
             import tiktoken  
-              
-            # Use cl100k_base encoding (used by GPT-4 and GPT-3.5-turbo)  
             encoding = tiktoken.get_encoding("cl100k_base")  
-            tokens = encoding.encode(text)  
-            return len(tokens)  
-              
+            return len(encoding.encode(text))  
         except ImportError:  
-            logger.warning("tiktoken not installed, using rough estimate")  
-            # Rough estimate: ~4 characters per token  
-            return len(text) // 4  
-        except Exception as e:  
-            logger.warning(f"Token counting failed: {e}")  
+            # Rough estimate  
             return len(text) // 4  
       
     def get_model_info(self) -> Dict[str, Any]:  
@@ -877,11 +1236,20 @@ class LLMGenerator:
         Returns:  
             Dict with model information  
         """  
-        return {  
-            "deployment": self.deployment_name,  
-            "endpoint": self.azure_endpoint,  
-            "api_version": self.api_version,  
-            "temperature": self.temperature,  
-            "max_tokens": self.max_tokens,  
-            "loaded": self._llm is not None  
+        info = {  
+            "provider": self.provider,  
+            "loaded": self._llm is not None,  
         }  
+          
+        if self.provider == "azure":  
+            info["deployment"] = self.llm_config.get("azure_deployment")  
+            info["endpoint"] = self.llm_config.get("azure_endpoint")  
+        elif self.provider == "gemini":  
+            info["model"] = self.llm_config.get("model_name")  
+        elif self.provider == "openai":  
+            info["model"] = self.llm_config.get("model_name")  
+          
+        info["temperature"] = self.llm_config.get("temperature")  
+        info["max_tokens"] = self.llm_config.get("max_tokens")  
+          
+        return info  

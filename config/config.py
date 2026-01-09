@@ -1,153 +1,214 @@
 """  
 config/config.py  
 ----------------  
-Centralized configuration for the RAG system.  
-All environment variables are standardized here.  
+Configuration management for RAG system with multi-LLM support.  
 """  
   
 import os  
-from typing import Optional  
+import logging  
+from pathlib import Path  
+from typing import Dict, Any, Optional, Literal  
 from dotenv import load_dotenv  
   
+# Load environment variables  
 load_dotenv()  
+  
+logger = logging.getLogger(__name__)  
   
   
 class Config:  
-    """Centralized configuration for RAG system."""  
+    """  
+    Configuration class for RAG system.  
       
-    # -------------------------------------------------------------------------  
-    # PDF Processing  
-    # -------------------------------------------------------------------------  
-    CHUNK_SIZE: int = 1000  
-    CHUNK_OVERLAP: int = 150  
+    Supports:  
+    - Azure OpenAI  
+    - Google Gemini  
+    - Local models (future)  
+    """  
       
-    # -------------------------------------------------------------------------  
+    # -------------------------------------------  
+    # LLM Provider Selection  
+    # -------------------------------------------  
+    LLM_PROVIDER: Literal["azure", "gemini", "openai"] = os.getenv("LLM_PROVIDER", "azure").lower()  
+      
+    # -------------------------------------------  
+    # Azure OpenAI Configuration  
+    # -------------------------------------------  
+    AZURE_OPENAI_API_KEY: str = os.getenv("AZURE_OPENAI_API_KEY", "")  
+    AZURE_OPENAI_ENDPOINT: str = os.getenv("AZURE_OPENAI_ENDPOINT", "")  
+    AZURE_OPENAI_API_VERSION: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")  
+    AZURE_OPENAI_DEPLOYMENT_NAME: str = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "")  
+      
+    # -------------------------------------------  
+    # Google Gemini Configuration  
+    # -------------------------------------------  
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")  
+    GEMINI_MODEL_NAME: str = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash-preview-05-20")  
+      
+    # -------------------------------------------  
+    # OpenAI Configuration (optional, for direct OpenAI)  
+    # -------------------------------------------  
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")  
+    OPENAI_MODEL_NAME: str = os.getenv("OPENAI_MODEL_NAME", "gpt-4")  
+      
+    # -------------------------------------------  
     # Embedding Configuration  
-    # -------------------------------------------------------------------------  
-    EMBEDDING_MODEL: str = "BAAI/bge-large-en-v1.5"  
-    EMBEDDING_DIMENSION: int = 1024  # Must match the model  
-    EMBEDDING_DEVICE: str = "cpu"  # Options: "cpu", "cuda", "mps"  
-    NORMALIZE_EMBEDDINGS: bool = True  
+    # -------------------------------------------  
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")  
+    EMBEDDING_DEVICE: Optional[str] = os.getenv("EMBEDDING_DEVICE", None)  
+    EMBEDDING_CACHE_ENABLED: bool = os.getenv("EMBEDDING_CACHE_ENABLED", "true").lower() == "true"  
+    EMBEDDING_CACHE_DIR: str = os.getenv("EMBEDDING_CACHE_DIR", ".cache/embeddings")  
+    EMBEDDING_BATCH_SIZE: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))  
       
-    # -------------------------------------------------------------------------  
-    # Vector Database  
-    # -------------------------------------------------------------------------  
-    VECTOR_DB: str = "chroma"  # Options: "chroma", "qdrant", "faiss"  
-    COLLECTION_NAME: str = "pdf_documents"  
-    CHROMA_PERSIST_DIR: str = "./chroma_db"  
+    # -------------------------------------------  
+    # Reranker Configuration  
+    # -------------------------------------------  
+    RERANKER_MODEL: str = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")  
+    RERANKER_DEVICE: Optional[str] = os.getenv("RERANKER_DEVICE", None)  
+    USE_CROSS_ENCODER: bool = os.getenv("USE_CROSS_ENCODER", "true").lower() == "true"  
       
-    # -------------------------------------------------------------------------  
-    # Retrieval  
-    # -------------------------------------------------------------------------  
-    TOP_K_RETRIEVAL: int = 20  
-    HYBRID_ALPHA: float = 0.5  # Weight between sparse (BM25) and dense  
+    # -------------------------------------------  
+    # Vector Store Configuration  
+    # -------------------------------------------  
+    CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")  
+    CHROMA_COLLECTION: str = os.getenv("CHROMA_COLLECTION", "rag_documents")  
       
-    # -------------------------------------------------------------------------  
-    # Re-ranking  
-    # -------------------------------------------------------------------------  
-    RERANKER_MODEL: str = "BAAI/bge-reranker-large"  
-    TOP_K_RERANK: int = 5  
-    RERANKER_DEVICE: str = "cpu"  
+    # -------------------------------------------  
+    # PDF Processing Configuration  
+    # -------------------------------------------  
+    PDF_CACHE_DIR: str = os.getenv("PDF_CACHE_DIR", ".cache/pdf")  
+    CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))  
+    CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))  
       
-    # -------------------------------------------------------------------------  
-    # Azure OpenAI Configuration (STANDARDIZED)  
-    # -------------------------------------------------------------------------  
-    # Primary environment variable names  
-    AZURE_OPENAI_API_KEY: Optional[str] = (  
-        os.getenv("AZURE_OPENAI_API_KEY") or  
-        os.getenv("azure_openai_key") or  
-        os.getenv("openai_api_key")  
-    )  
+    # -------------------------------------------  
+    # LLM Generation Configuration  
+    # -------------------------------------------  
+    LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.0"))  
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))  
       
-    AZURE_OPENAI_ENDPOINT: Optional[str] = (  
-        os.getenv("AZURE_OPENAI_ENDPOINT") or  
-        os.getenv("azure_openai_endpoint") or  
-        os.getenv("openai_api_base")  
-    )  
+    # -------------------------------------------  
+    # Prompt Configuration  
+    # -------------------------------------------  
+    MAX_CONTEXT_LENGTH: int = int(os.getenv("MAX_CONTEXT_LENGTH", "8000"))  
+    MAX_HISTORY_TURNS: int = int(os.getenv("MAX_HISTORY_TURNS", "5"))  
+    MAX_CHARS_PER_DOC: int = int(os.getenv("MAX_CHARS_PER_DOC", "1500"))  
+    PROMPTS_DIR: str = os.getenv("PROMPTS_DIR", "src/prompts/templates")  
       
-    AZURE_OPENAI_API_VERSION: str = (  
-        os.getenv("AZURE_OPENAI_API_VERSION") or  
-        os.getenv("api_version") or  
-        os.getenv("openai_api_version") or  
-        "2024-02-15-preview"  
-    )  
+    def __init__(self):  
+        """Initialize configuration."""  
+        self._validate_on_init()  
       
-    AZURE_OPENAI_DEPLOYMENT_NAME: Optional[str] = (  
-        os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") or  
-        os.getenv("deployment_name") or  
-        "gpt-4o"  
-    )  
+    def _validate_on_init(self):  
+        """Validate configuration on initialization."""  
+        # Auto-detect provider if not set  
+        if not self.LLM_PROVIDER or self.LLM_PROVIDER == "auto":  
+            self.LLM_PROVIDER = self._detect_provider()  
+            logger.info(f"Auto-detected LLM provider: {self.LLM_PROVIDER}")  
       
-    # LLM Parameters  
-    PRIMARY_TEMPERATURE: float = 0.2  
-    PRIMARY_MAX_TOKENS: int = 2000  
-    FALLBACK_TEMPERATURE: float = 0.3  
-    FALLBACK_MAX_TOKENS: int = 1500  
-    REQUEST_TIMEOUT: int = 60  
-    MAX_RETRIES: int = 2  
+    def _detect_provider(self) -> str:  
+        """Auto-detect which LLM provider to use based on available keys."""  
+        if self.AZURE_OPENAI_API_KEY and self.AZURE_OPENAI_ENDPOINT:  
+            return "azure"  
+        elif self.GEMINI_API_KEY:  
+            return "gemini"  
+        elif self.OPENAI_API_KEY:  
+            return "openai"  
+        else:  
+            logger.warning("No LLM API keys found!")  
+            return "none"  
       
-    # -------------------------------------------------------------------------  
-    # Memory Configuration  
-    # -------------------------------------------------------------------------  
-    MEMORY_KEY: str = "chat_history"  
-    MAX_TOKEN_LIMIT: int = 4000  
-    MAX_CONVERSATION_TURNS: int = 50  
-    SUMMARY_THRESHOLD_TOKENS: int = 2000  
+    def get_llm_provider(self) -> str:  
+        """Get the configured LLM provider."""  
+        return self.LLM_PROVIDER  
       
-    # -------------------------------------------------------------------------  
-    # Caching  
-    # -------------------------------------------------------------------------  
-    RESPONSE_CACHE_ENABLED: bool = True  
-    RESPONSE_CACHE_TTL_SECONDS: int = 3600  
-    RESPONSE_CACHE_MAX_SIZE: int = 100  
-    PDF_CACHE_ENABLED: bool = True  
-    PDF_CACHE_DIR: str = "./.cache/pdf"  
+    def get_azure_openai_config(self) -> Dict[str, Any]:  
+        """Get Azure OpenAI configuration."""  
+        return {  
+            "api_key": self.AZURE_OPENAI_API_KEY,  
+            "azure_endpoint": self.AZURE_OPENAI_ENDPOINT,  
+            "api_version": self.AZURE_OPENAI_API_VERSION,  
+            "azure_deployment": self.AZURE_OPENAI_DEPLOYMENT_NAME,  
+        }  
       
-    # -------------------------------------------------------------------------  
-    # Prompt Templates  
-    # -------------------------------------------------------------------------  
-    PROMPT_TEMPLATE_DIR: str = "config/prompts"  
+    def get_gemini_config(self) -> Dict[str, Any]:  
+        """Get Google Gemini configuration."""  
+        return {  
+            "api_key": self.GEMINI_API_KEY,  
+            "model_name": self.GEMINI_MODEL_NAME,  
+        }  
       
-    # -------------------------------------------------------------------------  
-    # Logging  
-    # -------------------------------------------------------------------------  
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")  
-    LOG_DIR: str = "logs"  
+    def get_openai_config(self) -> Dict[str, Any]:  
+        """Get OpenAI configuration."""  
+        return {  
+            "api_key": self.OPENAI_API_KEY,  
+            "model_name": self.OPENAI_MODEL_NAME,  
+        }  
       
-    # -------------------------------------------------------------------------  
-    # UI Configuration  
-    # -------------------------------------------------------------------------  
-    UI_TITLE: str = "Advanced RAG PDF Chat"  
-    UI_DESCRIPTION: str = "Upload a PDF and chat with its contents using advanced RAG techniques."  
+    def get_llm_config(self) -> Dict[str, Any]:  
+        """Get configuration for the active LLM provider."""  
+        provider = self.get_llm_provider()  
+          
+        if provider == "azure":  
+            return {  
+                "provider": "azure",  
+                **self.get_azure_openai_config(),  
+                "temperature": self.LLM_TEMPERATURE,  
+                "max_tokens": self.LLM_MAX_TOKENS,  
+            }  
+        elif provider == "gemini":  
+            return {  
+                "provider": "gemini",  
+                **self.get_gemini_config(),  
+                "temperature": self.LLM_TEMPERATURE,  
+                "max_tokens": self.LLM_MAX_TOKENS,  
+            }  
+        elif provider == "openai":  
+            return {  
+                "provider": "openai",  
+                **self.get_openai_config(),  
+                "temperature": self.LLM_TEMPERATURE,  
+                "max_tokens": self.LLM_MAX_TOKENS,  
+            }  
+        else:  
+            return {"provider": "none"}  
       
-    # -------------------------------------------------------------------------  
-    # Validation  
-    # -------------------------------------------------------------------------  
-    @classmethod  
-    def validate(cls) -> dict:  
-        """Validate configuration and return status."""  
+    def validate(self) -> Dict[str, Any]:  
+        """  
+        Validate the configuration.  
+          
+        Returns:  
+            Dict with 'valid' boolean and 'issues' list  
+        """  
         issues = []  
           
-        if not cls.AZURE_OPENAI_API_KEY:  
-            issues.append("AZURE_OPENAI_API_KEY is not set")  
+        provider = self.get_llm_provider()  
           
-        if not cls.AZURE_OPENAI_ENDPOINT:  
-            issues.append("AZURE_OPENAI_ENDPOINT is not set")  
-          
-        if not cls.AZURE_OPENAI_DEPLOYMENT_NAME:  
-            issues.append("AZURE_OPENAI_DEPLOYMENT_NAME is not set")  
+        if provider == "azure":  
+            if not self.AZURE_OPENAI_API_KEY:  
+                issues.append("AZURE_OPENAI_API_KEY not set")  
+            if not self.AZURE_OPENAI_ENDPOINT:  
+                issues.append("AZURE_OPENAI_ENDPOINT not set")  
+            if not self.AZURE_OPENAI_DEPLOYMENT_NAME:  
+                issues.append("AZURE_OPENAI_DEPLOYMENT_NAME not set")  
+        elif provider == "gemini":  
+            if not self.GEMINI_API_KEY:  
+                issues.append("GEMINI_API_KEY not set")  
+        elif provider == "openai":  
+            if not self.OPENAI_API_KEY:  
+                issues.append("OPENAI_API_KEY not set")  
+        elif provider == "none":  
+            issues.append("No LLM provider configured. Set LLM_PROVIDER and API keys.")  
           
         return {  
             "valid": len(issues) == 0,  
-            "issues": issues  
+            "issues": issues,  
+            "provider": provider  
         }  
       
-    @classmethod  
-    def get_azure_openai_config(cls) -> dict:  
-        """Get Azure OpenAI configuration as a dictionary."""  
-        return {  
-            "azure_endpoint": cls.AZURE_OPENAI_ENDPOINT,  
-            "api_key": cls.AZURE_OPENAI_API_KEY,  
-            "api_version": cls.AZURE_OPENAI_API_VERSION,  
-            "azure_deployment": cls.AZURE_OPENAI_DEPLOYMENT_NAME,  
-        }  
+    def __repr__(self) -> str:  
+        """String representation of config."""  
+        return (  
+            f"Config(provider={self.LLM_PROVIDER}, "  
+            f"embedding={self.EMBEDDING_MODEL}, "  
+            f"reranker={self.RERANKER_MODEL})"  
+        )  
