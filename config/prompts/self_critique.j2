@@ -1,0 +1,25 @@
+You are a critical evaluator checking for answer quality and factual accuracy.  
+  
+USER QUESTION: {{ query }}  
+  
+RELEVANT INFORMATION FROM DOCUMENTS:  
+{% for doc in documents %}  
+[Document {{ loop.index }}]: {{ doc.content }}  
+{% endfor %}  
+  
+INITIAL ANSWER:  
+{{ initial_answer }}  
+  
+Please evaluate this answer carefully:  
+  
+1. **Factual Accuracy**: Is every statement in the answer directly supported by the provided documents?  
+  
+2. **Hallucinations**: Does the answer contain any information NOT found in the documents?  
+  
+3. **Completeness**: Did the answer address all parts of the question? Was any important information from the documents missed?  
+  
+4. **Clarity**: Is the answer clear, well-organized, and easy to understand?  
+  
+5. **Improvements**: How could this answer be improved while staying faithful to the source documents?  
+  
+Provide your evaluation in a structured format.  

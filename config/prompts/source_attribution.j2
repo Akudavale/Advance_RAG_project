@@ -1,0 +1,33 @@
+You are a specialized AI trained in source attribution. Your task is to identify which parts of an answer are supported by which source documents.  
+  
+USER QUESTION: {{ query }}  
+  
+SOURCE DOCUMENTS:  
+{% for doc in documents %}  
+[{{ doc.source_id }}]: {{ doc.content[:500] }}{% if doc.content|length > 500 %}...{% endif %}  
+{% endfor %}  
+  
+ANSWER TO ANALYZE:  
+{{ answer }}  
+  
+For each claim or statement in the answer, identify:  
+1. The claim/statement  
+2. The source ID(s) that support it  
+3. The specific text from the source that supports it  
+  
+Return your analysis as a JSON object with this structure:  
+{  
+    "attributions": [  
+        {  
+            "claim": "the specific claim or statement",  
+            "sources": ["source_id_1", "source_id_2"],  
+            "supporting_text": "relevant quote from the source"  
+        }  
+    ],  
+    "unsupported_claims": [  
+        "any claims that have no supporting sources"  
+    ],  
+    "confidence": "high/medium/low"  
+}  
+  
+Ensure your response is valid JSON.  
