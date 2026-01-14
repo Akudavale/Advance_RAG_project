@@ -23,7 +23,7 @@ from src.orchestrator import RAGOrchestrator
 from config.config import Config  
   
   
-def main(PDF_PATH: str = ""):  
+def main(call_config: dict):  
     print("=" * 60)  
     print("RAG System with Multi-LLM Support")  
     print("=" * 60)  
@@ -64,7 +64,7 @@ def main(PDF_PATH: str = ""):
     print(f"\nCreated conversation: {conversation_id[:8]}...")  
       
     # Process a PDF  
-    pdf_path = PDF_PATH 
+    pdf_path = call_config.get("PDF_PATH")  
       
     if pdf_path and os.path.exists(pdf_path):  
         print(f"\nProcessing {pdf_path}...")  
@@ -169,9 +169,11 @@ def main(PDF_PATH: str = ""):
                 conversation_id=conversation_id,  
                 query=query,  
                 use_reranking=True,  
-                use_memory=True,  
-                top_k=10,  
-                rerank_top_k=5  
+                use_memory=True,
+                use_query_rewriting=call_config.get("use_query_rewriting"), 
+                top_k=call_config.get("top_k",10),  
+                rerank_top_k=call_config.get("rerank_top_k",5),
+                method=call_config.get("method", "hyde")
             )  
               
             elapsed = time.time() - start_time  
@@ -180,16 +182,16 @@ def main(PDF_PATH: str = ""):
                 print(f"\nAssistant: {response['answer']}")  
                 print(f"\n[{elapsed:.2f}s, {len(response.get('sources', []))} sources]")  
                   
-                if response.get("sources"):  
-                    show_sources = input("Show sources? (y/n): ").strip().lower()  
-                    if show_sources == 'y':  
-                        print("\nSources:")  
-                        for i, source in enumerate(response["sources"], 1):  
-                            score = source.get("score", 0)  
-                            page = source.get("metadata", {}).get("page_number", "?")  
-                            content_preview = source.get("content", "")[:150]  
-                            print(f"\n  [{i}] Page {page} (score: {score:.3f})")  
-                            print(f"      {content_preview}...")  
+                # if response.get("sources"):  
+                #     show_sources = input("Show sources? (y/n): ").strip().lower()  
+                #     if show_sources == 'y':  
+                #         print("\nSources:")  
+                #         for i, source in enumerate(response["sources"], 1):  
+                #             score = source.get("score", 0)  
+                #             page = source.get("metadata", {}).get("page_number", "?")  
+                #             content_preview = source.get("content", "")[:150]  
+                #             print(f"\n  [{i}] Page {page} (score: {score:.3f})")  
+                #             print(f"      {content_preview}...")  
                 print()  
             else:  
                 print(f"Error: {response['message']}\n")  
@@ -204,5 +206,12 @@ def main(PDF_PATH: str = ""):
   
   
 if __name__ == "__main__": 
-    PDF_PATH = "Abhishek_Master_Thesis.pdf" 
-    main(PDF_PATH)  
+
+    call_config={
+        "PDF_PATH": "Abhishek_Master_Thesis_draft_1.pdf",
+        "top_k": 20, # number of top documents to retrieve
+        "rerank_top_k": 10, # number of top documents to re-rank
+        "use_query_rewriting": True,  # Enable query re-writing
+        "method": "expand" # query re-write method: "hyde" , "expand", "multi", "decompose" 
+    }
+    main(call_config)

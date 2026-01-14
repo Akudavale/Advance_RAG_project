@@ -834,7 +834,8 @@ class RAGOrchestrator:
         use_reranking: bool = True,  
         use_query_rewriting: bool = False,  
         top_k: int = 10,  
-        rerank_top_k: int = 5  
+        rerank_top_k: int = 5,
+        method: str = "hyde"
     ) -> Dict[str, Any]:  
         """  
         Process a user query.  
@@ -874,16 +875,25 @@ class RAGOrchestrator:
               
             # Optionally rewrite query  
             if use_query_rewriting and conversation_context:  
-                try:  
-                    rewritten = self.query_rewriter.rewrite(  
+                try:
+                    print("Rewriting query...")  
+                    rewrite_result = self.query_rewriter.rewrite(  
                         query=query,  
-                        conversation_history=conversation_context  
+                        context=conversation_context,
+                        method=method  
                     )  
-                    if rewritten and rewritten != query:  
-                        logger.debug(f"Query rewritten: '{query}' -> '{rewritten}'")  
-                        query = rewritten  
+                    # print(f"Rewrite result: {rewrite_result}")  
+                    if rewrite_result.get("success"):  
+                        rewritten_query = rewrite_result.get("rewritten_query", query)  
+                        if rewritten_query and rewritten_query != query:
+                            # print(f"Query rewritten: '{query}' -> '{rewritten_query}'")  
+                            logger.debug(f"Query rewritten: '{query}' -> '{rewritten_query}'")  
+                            query = rewritten_query  
+                    else:  
+                        logger.warning(f"Query rewriting unsuccessful: {rewrite_result.get('error')}")  
+                        
                 except Exception as e:  
-                    logger.warning(f"Query rewriting failed: {e}")  
+                    logger.warning(f"Query rewriting failed: {e}")
               
             # Retrieve documents  
             search_results = self.vector_store.search(query, top_k=top_k)  
