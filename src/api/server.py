@@ -108,6 +108,8 @@ class QueryRequest(BaseModel):
     use_memory: bool = True  
     use_reranking: bool = True  
     use_query_rewriting: bool = False  
+    agentic: bool = True
+    agent_max_steps: int = Field(default=3, ge=1, le=8)
       
     model_config = ConfigDict(  
         json_schema_extra={  
@@ -250,7 +252,9 @@ def query(request: QueryRequest):
             use_optimized_prompts=request.use_optimized_prompts,  
             use_memory=request.use_memory,  
             use_reranking=request.use_reranking,  
-            use_query_rewriting=request.use_query_rewriting  
+            use_query_rewriting=request.use_query_rewriting,
+            agentic=request.agentic,
+            agent_max_steps=request.agent_max_steps,
         )  
           
         if result.get("status") == "error":  

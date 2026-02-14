@@ -164,8 +164,15 @@ class APIClient:
             logger.error(f"Upload error: {e}")
             return {"status": "error", "message": str(e)}
     
-    def send_query(self, query: str, conversation_id: str = None, 
-                   use_optimized_prompts: bool = True, stream: bool = False) -> Dict[str, Any]:
+    def send_query(
+        self,
+        query: str,
+        conversation_id: str = None,
+        use_optimized_prompts: bool = True,
+        stream: bool = False,
+        agentic: bool = True,
+        agent_max_steps: int = 3,
+    ) -> Dict[str, Any]:
         """Send a query to the API."""
         try:
             # Prepare request body
@@ -173,7 +180,9 @@ class APIClient:
                 "query": query,
                 "conversation_id": conversation_id,
                 "use_optimized_prompts": use_optimized_prompts,
-                "stream": stream
+                "stream": stream,
+                "agentic": agentic,
+                "agent_max_steps": agent_max_steps,
             }
             
             if stream:
@@ -316,6 +325,8 @@ def initialize_session_state():
         st.session_state.settings = {
             "use_optimized_prompts": True,
             "use_memory": True,
+            "agentic": True,
+            "agent_max_steps": 3,
             "stream_responses": True,
             "show_sources": True,
             "show_metrics": False,
@@ -642,6 +653,26 @@ def render_feedback_form():
 
 def process_streaming_response(response):
     """Process a streaming response from the API."""
+    # Some backends return regular JSON even when the client requests streaming.
+    content_type = (response.headers.get("content-type") or "").lower()
+    if "text/event-stream" not in content_type:
+        try:
+            data = response.json()
+            if isinstance(data, dict) and data.get("status") == "success":
+                return {
+                    "role": "assistant",
+                    "content": data.get("answer", ""),
+                    "metadata": {
+                        "retrieved_documents": data.get("sources", []),
+                        "evaluation": data.get("evaluation", {}),
+                        "timings": data.get("timings", {}),
+                        "agent": data.get("metadata", {}),
+                        "timestamp": time.time()
+                    }
+                }
+        except Exception as e:
+            logger.error(f"Failed to parse non-streaming JSON response: {e}")
+
     # Create placeholders for the answer
     answer_placeholder = st.empty()
     sources_placeholder = st.empty()
@@ -840,6 +871,23 @@ def render_sidebar():
             st.checkbox("Use conversation memory", value=settings.get("use_memory", True), 
                        key="setting_use_memory", 
                        on_change=lambda: settings.update({"use_memory": st.session_state.setting_use_memory}))
+
+            st.checkbox(
+                "Use agentic RAG",
+                value=settings.get("agentic", True),
+                key="setting_agentic",
+                on_change=lambda: settings.update({"agentic": st.session_state.setting_agentic}),
+            )
+
+            st.number_input(
+                "Agent max steps",
+                min_value=1,
+                max_value=8,
+                value=int(settings.get("agent_max_steps", 3)),
+                step=1,
+                key="setting_agent_max_steps",
+                on_change=lambda: settings.update({"agent_max_steps": int(st.session_state.setting_agent_max_steps)}),
+            )
             
             st.checkbox("Stream responses", value=settings.get("stream_responses", True), 
                        key="setting_stream_responses", 
@@ -977,6 +1025,8 @@ def render_chat_interface():
                 # Get settings
                 use_optimized = st.session_state.settings.get("use_optimized_prompts", True)
                 stream_response = st.session_state.settings.get("stream_responses", True)
+                use_agentic = st.session_state.settings.get("agentic", True)
+                agent_max_steps = int(st.session_state.settings.get("agent_max_steps", 3))
                 
                 if stream_response:
                     # Get streaming response
@@ -984,7 +1034,9 @@ def render_chat_interface():
                         query=user_query,
                         conversation_id=st.session_state.current_conversation_id,
                         use_optimized_prompts=use_optimized,
-                        stream=True
+                        stream=True,
+                        agentic=use_agentic,
+                        agent_max_steps=agent_max_steps,
                     )
                     
                     if isinstance(response_obj, requests.Response):
@@ -1008,18 +1060,21 @@ def render_chat_interface():
                         query=user_query,
                         conversation_id=st.session_state.current_conversation_id,
                         use_optimized_prompts=use_optimized,
-                        stream=False
+                        stream=False,
+                        agentic=use_agentic,
+                        agent_max_steps=agent_max_steps,
                     )
                     
-                    if response and "status" not in response:
+                    if response and response.get("status") == "success":
                         # Create assistant message
                         assistant_msg = {
                             "role": "assistant",
                             "content": response["answer"],
                             "metadata": {
-                                "retrieved_documents": response.get("retrieved_documents", []),
+                                "retrieved_documents": response.get("sources", []),
                                 "evaluation": response.get("evaluation", {}),
-                                "timings": response.get("timings", {})
+                                "timings": response.get("timings", {}),
+                                "agent": response.get("metadata", {}),
                             }
                         }
                         
@@ -1176,6 +1231,19 @@ def render_settings_page():
             "Use conversation memory",
             value=settings.get("use_memory", True)
         )
+
+        agentic = st.checkbox(
+            "Use agentic RAG",
+            value=settings.get("agentic", True)
+        )
+
+        agent_max_steps = st.number_input(
+            "Agent max steps",
+            min_value=1,
+            max_value=8,
+            value=int(settings.get("agent_max_steps", 3)),
+            step=1
+        )
         
         streaming = st.checkbox(
             "Stream responses",
@@ -1210,6 +1278,8 @@ def render_settings_page():
         settings.update({
             "use_optimized_prompts": optimized,
             "use_memory": memory,
+            "agentic": agentic,
+            "agent_max_steps": int(agent_max_steps),
             "stream_responses": streaming,
             "show_sources": sources,
             "show_metrics": metrics,

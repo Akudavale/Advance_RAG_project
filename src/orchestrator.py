@@ -526,6 +526,8 @@ Main RAG orchestrator with document deduplication support.
 import logging  
 import uuid  
 import os  
+import json
+import re
 from typing import Dict, Any, List, Optional  
 from datetime import datetime  
   
@@ -835,7 +837,9 @@ class RAGOrchestrator:
         use_query_rewriting: bool = False,  
         top_k: int = 10,  
         rerank_top_k: int = 5,
-        method: str = "hyde"
+        method: str = "hyde",
+        agentic: bool = True,
+        agent_max_steps: int = 3,
     ) -> Dict[str, Any]:  
         """  
         Process a user query.  
@@ -849,11 +853,27 @@ class RAGOrchestrator:
             use_query_rewriting: Whether to rewrite the query  
             top_k: Number of initial results to retrieve  
             rerank_top_k: Number of results after reranking  
+            agentic: Whether to use the agentic loop
+            agent_max_steps: Max decide-act iterations for agentic mode
               
         Returns:  
             Dict with answer and sources  
         """  
         try:  
+            if agentic:
+                return self._query_agentic(
+                    query=query,
+                    conversation_id=conversation_id,
+                    use_optimized_prompts=use_optimized_prompts,
+                    use_memory=use_memory,
+                    use_reranking=use_reranking,
+                    use_query_rewriting=use_query_rewriting,
+                    top_k=top_k,
+                    rerank_top_k=rerank_top_k,
+                    method=method,
+                    agent_max_steps=agent_max_steps,
+                )
+
             # Validate query  
             if not query or not query.strip():  
                 return {  
@@ -990,6 +1010,281 @@ class RAGOrchestrator:
                 "status": "error",  
                 "message": str(e)  
             }  
+
+    def _query_agentic(
+        self,
+        query: str,
+        conversation_id: Optional[str] = None,
+        use_optimized_prompts: bool = True,
+        use_memory: bool = True,
+        use_reranking: bool = True,
+        use_query_rewriting: bool = False,
+        top_k: int = 10,
+        rerank_top_k: int = 5,
+        method: str = "hyde",
+        agent_max_steps: int = 3,
+    ) -> Dict[str, Any]:
+        """Agentic query execution with iterative decide-act loop."""
+        if not query or not query.strip():
+            return {"status": "error", "message": "Empty query"}
+
+        original_query = query.strip()
+        working_query = original_query
+        rewritten_query = None
+        max_steps = max(1, int(agent_max_steps))
+
+        # Get conversation context once; the planner uses this for decisions.
+        conversation_context: List[Dict[str, Any]] = []
+        if use_memory and conversation_id:
+            history = self.get_conversation_history(conversation_id)
+            if history.get("status") == "success":
+                messages = history["conversation"].get("messages", [])
+                conversation_context = messages[-6:]
+
+        context_docs: List[Dict[str, Any]] = []
+        sources: List[Dict[str, Any]] = []
+        trace: List[Dict[str, Any]] = []
+
+        for step in range(1, max_steps + 1):
+            decision = self._agent_decide(
+                original_query=original_query,
+                working_query=working_query,
+                has_context=bool(context_docs),
+                step=step,
+                max_steps=max_steps,
+                use_query_rewriting=use_query_rewriting,
+                default_method=method,
+                default_top_k=top_k,
+            )
+
+            action = str(decision.get("action", "retrieve")).strip().lower()
+
+            if action == "rewrite" and use_query_rewriting:
+                rewrite_method = str(decision.get("method", method)).strip().lower() or method
+                rewrite_result = self.query_rewriter.rewrite(
+                    query=working_query,
+                    context=conversation_context,
+                    method=rewrite_method,
+                )
+                next_query = rewrite_result.get("rewritten_query", working_query) or working_query
+                next_query = next_query.strip()
+
+                if next_query and next_query != working_query:
+                    rewritten_query = next_query
+                    working_query = next_query
+
+                trace.append(
+                    {
+                        "step": step,
+                        "action": "rewrite",
+                        "method": rewrite_method,
+                        "success": bool(rewrite_result.get("success")),
+                    }
+                )
+                continue
+
+            if action == "answer" and context_docs:
+                trace.append({"step": step, "action": "answer", "reason": "sufficient_context"})
+                break
+
+            # Default action: retrieve.
+            retrieve_top_k = decision.get("top_k", top_k)
+            try:
+                retrieve_top_k = int(retrieve_top_k)
+            except Exception:
+                retrieve_top_k = top_k
+            retrieve_top_k = max(1, min(retrieve_top_k, 50))
+
+            search_results = self.vector_store.search(working_query, top_k=retrieve_top_k)
+
+            if use_reranking and len(search_results) > 1:
+                try:
+                    search_results = self.reranker.rerank(
+                        query=working_query,
+                        results=search_results,
+                        top_k=rerank_top_k,
+                    )
+                except Exception as e:
+                    logger.warning(f"Agentic reranking failed: {e}")
+                    search_results = search_results[:rerank_top_k]
+            else:
+                search_results = search_results[:rerank_top_k]
+
+            context_docs = [
+                {
+                    "index": i + 1,
+                    "content": result.content,
+                    "metadata": result.metadata,
+                    "score": result.score,
+                }
+                for i, result in enumerate(search_results)
+            ]
+
+            trace.append(
+                {
+                    "step": step,
+                    "action": "retrieve",
+                    "query_used": working_query,
+                    "retrieved": len(context_docs),
+                }
+            )
+
+            if context_docs and action == "answer":
+                break
+
+        if not context_docs:
+            return {
+                "status": "success",
+                "answer": "I couldn't find any relevant information to answer your question. Please make sure you've uploaded relevant documents.",
+                "sources": [],
+                "query": original_query,
+                "rewritten_query": rewritten_query,
+                "metadata": {
+                    "agentic": True,
+                    "agent_steps": trace,
+                },
+            }
+
+        if use_optimized_prompts:
+            try:
+                prompt = self.prompt_optimizer.build_prompt(
+                    query=original_query,
+                    context_docs=context_docs,
+                    conversation_history=conversation_context,
+                )
+            except Exception as e:
+                logger.warning(f"Agentic prompt optimization failed: {e}")
+                prompt = self._build_simple_prompt(original_query, context_docs)
+        else:
+            prompt = self._build_simple_prompt(original_query, context_docs)
+
+        answer = self.llm_generator.generate(prompt)
+
+        if conversation_id:
+            if conversation_id not in self._conversations:
+                self.create_conversation()
+                self._conversations[conversation_id] = self._conversations.pop(
+                    list(self._conversations.keys())[-1]
+                )
+                self._conversations[conversation_id]["id"] = conversation_id
+
+            self._conversations[conversation_id]["messages"].append(
+                {
+                    "role": "user",
+                    "content": original_query,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+            self._conversations[conversation_id]["messages"].append(
+                {
+                    "role": "assistant",
+                    "content": answer,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+
+        for doc in context_docs:
+            content = doc["content"]
+            sources.append(
+                {
+                    "content": content[:200] + "..." if len(content) > 200 else content,
+                    "metadata": doc.get("metadata", {}),
+                    "score": doc.get("score", 0.0),
+                }
+            )
+
+        return {
+            "status": "success",
+            "answer": answer,
+            "sources": sources,
+            "query": original_query,
+            "rewritten_query": rewritten_query,
+            "metadata": {
+                "agentic": True,
+                "agent_steps": trace,
+            },
+        }
+
+    def _agent_decide(
+        self,
+        original_query: str,
+        working_query: str,
+        has_context: bool,
+        step: int,
+        max_steps: int,
+        use_query_rewriting: bool,
+        default_method: str,
+        default_top_k: int,
+    ) -> Dict[str, Any]:
+        """Decide next tool action for agentic loop."""
+        if step >= max_steps and has_context:
+            return {"action": "answer"}
+        if not has_context:
+            return {"action": "rewrite" if use_query_rewriting and step == 1 else "retrieve", "method": default_method, "top_k": default_top_k}
+
+        planner_prompt = (
+            "You are controlling a RAG agent. Choose one next action.\n"
+            "Return ONLY valid JSON with keys: action, method, top_k, reason.\n"
+            "Allowed action values: rewrite, retrieve, answer.\n"
+            "Allowed method values: expand, hyde, multi, decompose.\n"
+            f"Original query: {original_query}\n"
+            f"Current query: {working_query}\n"
+            f"Has retrieved context: {has_context}\n"
+            f"Step: {step}/{max_steps}\n"
+            "Rules:\n"
+            "1) If context already exists and appears sufficient, choose answer.\n"
+            "2) Choose retrieve if more evidence is needed.\n"
+            "3) Choose rewrite only if retrieval is likely improved by reframing.\n"
+            "4) Keep top_k between 3 and 20.\n"
+        )
+
+        try:
+            raw = self.llm_generator.generate(planner_prompt)
+            parsed = self._extract_json_object(raw)
+            if parsed:
+                action = str(parsed.get("action", "retrieve")).lower()
+                if action not in {"rewrite", "retrieve", "answer"}:
+                    action = "retrieve"
+                method = str(parsed.get("method", default_method)).lower()
+                if method not in {"expand", "hyde", "multi", "decompose"}:
+                    method = default_method
+                top_k = parsed.get("top_k", default_top_k)
+                try:
+                    top_k = int(top_k)
+                except Exception:
+                    top_k = default_top_k
+                return {
+                    "action": action,
+                    "method": method,
+                    "top_k": max(3, min(top_k, 20)),
+                    "reason": parsed.get("reason", ""),
+                }
+        except Exception as e:
+            logger.warning(f"Agent planner failed: {e}")
+
+        return {"action": "answer" if has_context else "retrieve", "method": default_method, "top_k": default_top_k}
+
+    def _extract_json_object(self, text: str) -> Dict[str, Any]:
+        """Extract first JSON object from model output."""
+        if not text:
+            return {}
+
+        text = text.strip()
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            return {}
+
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
       
     def _build_simple_prompt(  
         self,  
