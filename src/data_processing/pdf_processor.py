@@ -8,6 +8,7 @@ import logging
 import hashlib  
 import json  
 import os  
+import re
 from pathlib import Path  
 from typing import List, Dict, Any, Optional  
 from dataclasses import dataclass, field  
@@ -431,7 +432,6 @@ class PDFProcessor:
             return ""  
           
         # Replace multiple whitespace with single space  
-        import re  
         text = re.sub(r'[ \t]+', ' ', text)  
           
         # Replace multiple newlines with double newline  
@@ -465,7 +465,7 @@ class PDFProcessor:
         chunk_id = 0  
           
         for page in pages:  
-            page_chunks = self._chunk_text(  
+            page_chunks = self._chunk_text_structure_aware(
                 text=page.content,  
                 page_number=page.page_number,  
                 filename=filename,  
@@ -475,6 +475,150 @@ class PDFProcessor:
             chunk_id += len(page_chunks)  
           
         return chunks  
+
+    def _chunk_text_structure_aware(
+        self,
+        text: str,
+        page_number: int,
+        filename: str,
+        start_chunk_id: int = 0,
+    ) -> List[ProcessedChunk]:
+        """
+        Chunk text by paragraph-like units and then pack into target chunk size.
+
+        This improves semantic coherence vs pure fixed-window chunking.
+        """
+        if not text or not text.strip():
+            return []
+
+        units = self._split_text_units(text)
+        if not units:
+            return self._chunk_text(
+                text=text,
+                page_number=page_number,
+                filename=filename,
+                start_chunk_id=start_chunk_id,
+            )
+
+        chunks: List[ProcessedChunk] = []
+        chunk_id = start_chunk_id
+        current_parts: List[Dict[str, Any]] = []
+        current_len = 0
+
+        for unit in units:
+            unit_text = unit["text"]
+            unit_len = len(unit_text)
+
+            if unit_len >= self.chunk_size:
+                # Flush packed content first
+                if current_parts:
+                    built = self._build_chunk_from_parts(
+                        current_parts, chunk_id, page_number, filename
+                    )
+                    if built:
+                        chunks.append(built)
+                        chunk_id += 1
+                    current_parts = []
+                    current_len = 0
+
+                # Fall back to sentence-aware windowing for oversized unit
+                sub_chunks = self._chunk_text(
+                    text=unit_text,
+                    page_number=page_number,
+                    filename=filename,
+                    start_chunk_id=chunk_id,
+                )
+                chunks.extend(sub_chunks)
+                chunk_id += len(sub_chunks)
+                continue
+
+            projected = current_len + (2 if current_parts else 0) + unit_len
+            if projected <= self.chunk_size:
+                current_parts.append(unit)
+                current_len = projected
+            else:
+                built = self._build_chunk_from_parts(
+                    current_parts, chunk_id, page_number, filename
+                )
+                if built:
+                    chunks.append(built)
+                    chunk_id += 1
+
+                # Carry overlap from previous chunk tail as contextual prefix
+                overlap_text = ""
+                if built and self.chunk_overlap > 0:
+                    overlap_text = built.content[-self.chunk_overlap :].strip()
+
+                current_parts = []
+                current_len = 0
+
+                if overlap_text:
+                    current_parts.append(
+                        {
+                            "text": overlap_text,
+                            "start": max(0, unit["start"] - len(overlap_text)),
+                            "end": unit["start"],
+                        }
+                    )
+                    current_len = len(overlap_text)
+
+                current_parts.append(unit)
+                current_len += (2 if overlap_text else 0) + unit_len
+
+        if current_parts:
+            built = self._build_chunk_from_parts(
+                current_parts, chunk_id, page_number, filename
+            )
+            if built:
+                chunks.append(built)
+
+        return chunks
+
+    def _split_text_units(self, text: str) -> List[Dict[str, Any]]:
+        """Split text into paragraph-like units while preserving character offsets."""
+        units: List[Dict[str, Any]] = []
+        cursor = 0
+
+        for block in re.split(r"\n\s*\n", text):
+            block_text = block.strip()
+            if not block_text:
+                continue
+
+            idx = text.find(block_text, cursor)
+            if idx < 0:
+                idx = cursor
+            end = idx + len(block_text)
+
+            units.append({"text": block_text, "start": idx, "end": end})
+            cursor = end
+
+        return units
+
+    def _build_chunk_from_parts(
+        self,
+        parts: List[Dict[str, Any]],
+        chunk_id: int,
+        page_number: int,
+        filename: str,
+    ) -> Optional[ProcessedChunk]:
+        if not parts:
+            return None
+
+        content = "\n\n".join(p["text"] for p in parts).strip()
+        if not content:
+            return None
+
+        return ProcessedChunk(
+            chunk_id=chunk_id,
+            content=content,
+            page_number=page_number,
+            start_char=parts[0]["start"],
+            end_char=parts[-1]["end"],
+            metadata={
+                "filename": filename,
+                "source": filename,
+            },
+        )
       
     def _chunk_text(  
         self,  

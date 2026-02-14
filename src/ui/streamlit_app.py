@@ -172,6 +172,8 @@ class APIClient:
         stream: bool = False,
         agentic: bool = True,
         agent_max_steps: int = 3,
+        retrieval_mode: str = "hybrid",
+        hybrid_alpha: float = 0.5,
     ) -> Dict[str, Any]:
         """Send a query to the API."""
         try:
@@ -183,6 +185,8 @@ class APIClient:
                 "stream": stream,
                 "agentic": agentic,
                 "agent_max_steps": agent_max_steps,
+                "retrieval_mode": retrieval_mode,
+                "hybrid_alpha": hybrid_alpha,
             }
             
             if stream:
@@ -327,6 +331,8 @@ def initialize_session_state():
             "use_memory": True,
             "agentic": True,
             "agent_max_steps": 3,
+            "retrieval_mode": "hybrid",
+            "hybrid_alpha": 0.5,
             "stream_responses": True,
             "show_sources": True,
             "show_metrics": False,
@@ -888,6 +894,24 @@ def render_sidebar():
                 key="setting_agent_max_steps",
                 on_change=lambda: settings.update({"agent_max_steps": int(st.session_state.setting_agent_max_steps)}),
             )
+
+            st.selectbox(
+                "Retrieval mode",
+                options=["hybrid", "vector", "bm25"],
+                index=["hybrid", "vector", "bm25"].index(settings.get("retrieval_mode", "hybrid")),
+                key="setting_retrieval_mode",
+                on_change=lambda: settings.update({"retrieval_mode": st.session_state.setting_retrieval_mode}),
+            )
+
+            st.slider(
+                "Hybrid alpha (vector weight)",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(settings.get("hybrid_alpha", 0.5)),
+                step=0.05,
+                key="setting_hybrid_alpha",
+                on_change=lambda: settings.update({"hybrid_alpha": float(st.session_state.setting_hybrid_alpha)}),
+            )
             
             st.checkbox("Stream responses", value=settings.get("stream_responses", True), 
                        key="setting_stream_responses", 
@@ -1027,6 +1051,8 @@ def render_chat_interface():
                 stream_response = st.session_state.settings.get("stream_responses", True)
                 use_agentic = st.session_state.settings.get("agentic", True)
                 agent_max_steps = int(st.session_state.settings.get("agent_max_steps", 3))
+                retrieval_mode = st.session_state.settings.get("retrieval_mode", "hybrid")
+                hybrid_alpha = float(st.session_state.settings.get("hybrid_alpha", 0.5))
                 
                 if stream_response:
                     # Get streaming response
@@ -1037,6 +1063,8 @@ def render_chat_interface():
                         stream=True,
                         agentic=use_agentic,
                         agent_max_steps=agent_max_steps,
+                        retrieval_mode=retrieval_mode,
+                        hybrid_alpha=hybrid_alpha,
                     )
                     
                     if isinstance(response_obj, requests.Response):
@@ -1063,6 +1091,8 @@ def render_chat_interface():
                         stream=False,
                         agentic=use_agentic,
                         agent_max_steps=agent_max_steps,
+                        retrieval_mode=retrieval_mode,
+                        hybrid_alpha=hybrid_alpha,
                     )
                     
                     if response and response.get("status") == "success":
@@ -1244,6 +1274,20 @@ def render_settings_page():
             value=int(settings.get("agent_max_steps", 3)),
             step=1
         )
+
+        retrieval_mode = st.selectbox(
+            "Retrieval mode",
+            options=["hybrid", "vector", "bm25"],
+            index=["hybrid", "vector", "bm25"].index(settings.get("retrieval_mode", "hybrid"))
+        )
+
+        hybrid_alpha = st.slider(
+            "Hybrid alpha (vector weight)",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(settings.get("hybrid_alpha", 0.5)),
+            step=0.05
+        )
         
         streaming = st.checkbox(
             "Stream responses",
@@ -1280,6 +1324,8 @@ def render_settings_page():
             "use_memory": memory,
             "agentic": agentic,
             "agent_max_steps": int(agent_max_steps),
+            "retrieval_mode": retrieval_mode,
+            "hybrid_alpha": float(hybrid_alpha),
             "stream_responses": streaming,
             "show_sources": sources,
             "show_metrics": metrics,

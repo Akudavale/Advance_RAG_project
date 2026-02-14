@@ -652,3 +652,44 @@ class VectorStore:
             stats["total_vectors"] = 0  
           
         return stats  
+
+    def get_all_documents(self) -> List[Dict[str, Any]]:
+        """
+        Return all indexed chunks as document dictionaries.
+
+        Returns:
+            List of {"content", "metadata", "document_id"}
+        """
+        if self._collection is None:
+            if hasattr(self, "_documents"):
+                return [
+                    {
+                        "content": d.content,
+                        "metadata": d.metadata,
+                        "document_id": d.id,
+                    }
+                    for d in self._documents
+                ]
+            return []
+
+        try:
+            results = self._collection.get(
+                include=["documents", "metadatas"]
+            )
+            ids = results.get("ids", []) if results else []
+            docs = results.get("documents", []) if results else []
+            metas = results.get("metadatas", []) if results else []
+
+            out = []
+            for doc_id, content, metadata in zip(ids, docs, metas):
+                out.append(
+                    {
+                        "content": content or "",
+                        "metadata": metadata or {},
+                        "document_id": doc_id or "",
+                    }
+                )
+            return out
+        except Exception as e:
+            logger.warning(f"Failed to export all documents: {e}")
+            return []

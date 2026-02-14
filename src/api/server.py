@@ -110,6 +110,11 @@ class QueryRequest(BaseModel):
     use_query_rewriting: bool = False  
     agentic: bool = True
     agent_max_steps: int = Field(default=3, ge=1, le=8)
+    retrieval_mode: str = Field(default="hybrid", pattern="^(vector|bm25|hybrid)$")
+    dense_top_k: Optional[int] = Field(default=None, ge=1, le=100)
+    sparse_top_k: Optional[int] = Field(default=None, ge=1, le=100)
+    hybrid_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    filter_filenames: Optional[list[str]] = None
       
     model_config = ConfigDict(  
         json_schema_extra={  
@@ -255,6 +260,11 @@ def query(request: QueryRequest):
             use_query_rewriting=request.use_query_rewriting,
             agentic=request.agentic,
             agent_max_steps=request.agent_max_steps,
+            retrieval_mode=request.retrieval_mode,
+            dense_top_k=request.dense_top_k,
+            sparse_top_k=request.sparse_top_k,
+            hybrid_alpha=request.hybrid_alpha,
+            filter_filenames=request.filter_filenames,
         )  
           
         if result.get("status") == "error":  

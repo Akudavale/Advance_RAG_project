@@ -528,7 +528,7 @@ import uuid
 import os  
 import json
 import re
-from typing import Dict, Any, List, Optional  
+from typing import Dict, Any, List, Optional
 from datetime import datetime  
   
 logger = logging.getLogger(__name__)  
@@ -565,6 +565,8 @@ class RAGOrchestrator:
         self._query_rewriter = None  
         self._conversation_memory = None  
         self._prompt_optimizer = None  
+        self._bm25_index = None
+        self._bm25_bootstrapped = False
           
         # Conversation storage  
         self._conversations: Dict[str, Dict[str, Any]] = {}  
@@ -641,6 +643,15 @@ class RAGOrchestrator:
             from src.prompts.prompt_optimizer import PromptOptimizer  
             self._prompt_optimizer = PromptOptimizer(self.config)  
         return self._prompt_optimizer  
+
+    @property
+    def bm25_index(self):
+        """Lazy load BM25 index."""
+        if self._bm25_index is None:
+            from src.retrieval.bm25_index import BM25Index
+
+            self._bm25_index = BM25Index(self.config)
+        return self._bm25_index
       
     # -------------------------------------------  
     # Conversation management  
@@ -755,6 +766,7 @@ class RAGOrchestrator:
               
             # Add to vector store (with deduplication)  
             result = self.vector_store.add_documents(chunks, skip_duplicates=True)  
+            self.bm25_index.add_documents(chunks)
               
             # Associate with conversation  
             if conversation_id:  
@@ -812,6 +824,7 @@ class RAGOrchestrator:
             Dict with status  
         """  
         result = self.vector_store.delete_document(filename)  
+        self.bm25_index.delete_document(filename)
           
         # Also clear from PDF cache  
         # Note: We don't delete PDF cache as it might be useful for reprocessing  
@@ -840,6 +853,11 @@ class RAGOrchestrator:
         method: str = "hyde",
         agentic: bool = True,
         agent_max_steps: int = 3,
+        retrieval_mode: str = "hybrid",
+        dense_top_k: Optional[int] = None,
+        sparse_top_k: Optional[int] = None,
+        hybrid_alpha: float = 0.5,
+        filter_filenames: Optional[List[str]] = None,
     ) -> Dict[str, Any]:  
         """  
         Process a user query.  
@@ -855,12 +873,18 @@ class RAGOrchestrator:
             rerank_top_k: Number of results after reranking  
             agentic: Whether to use the agentic loop
             agent_max_steps: Max decide-act iterations for agentic mode
+            retrieval_mode: Retrieval mode: vector, bm25, hybrid
+            dense_top_k: vector retrieval cutoff
+            sparse_top_k: bm25 retrieval cutoff
+            hybrid_alpha: weighting for vector in hybrid fusion
+            filter_filenames: optional list of filenames to constrain retrieval
               
         Returns:  
             Dict with answer and sources  
         """  
         try:  
             if agentic:
+                print("Agentic RAG...")  
                 return self._query_agentic(
                     query=query,
                     conversation_id=conversation_id,
@@ -872,6 +896,11 @@ class RAGOrchestrator:
                     rerank_top_k=rerank_top_k,
                     method=method,
                     agent_max_steps=agent_max_steps,
+                    retrieval_mode=retrieval_mode,
+                    dense_top_k=dense_top_k,
+                    sparse_top_k=sparse_top_k,
+                    hybrid_alpha=hybrid_alpha,
+                    filter_filenames=filter_filenames,
                 )
 
             # Validate query  
@@ -915,8 +944,16 @@ class RAGOrchestrator:
                 except Exception as e:  
                     logger.warning(f"Query rewriting failed: {e}")
               
-            # Retrieve documents  
-            search_results = self.vector_store.search(query, top_k=top_k)  
+            # Retrieve documents
+            search_results = self._retrieve_documents(
+                query=query,
+                top_k=top_k,
+                retrieval_mode=retrieval_mode,
+                dense_top_k=dense_top_k,
+                sparse_top_k=sparse_top_k,
+                hybrid_alpha=hybrid_alpha,
+                filter_filenames=filter_filenames,
+            )
               
             if not search_results:  
                 return {  
@@ -1001,7 +1038,10 @@ class RAGOrchestrator:
                 "answer": answer,  
                 "sources": sources,  
                 "query": original_query,  
-                "rewritten_query": query if query != original_query else None  
+                "rewritten_query": query if query != original_query else None,
+                "metadata": {
+                    "retrieval_mode": retrieval_mode
+                }  
             }  
               
         except Exception as e:  
@@ -1023,6 +1063,11 @@ class RAGOrchestrator:
         rerank_top_k: int = 5,
         method: str = "hyde",
         agent_max_steps: int = 3,
+        retrieval_mode: str = "hybrid",
+        dense_top_k: Optional[int] = None,
+        sparse_top_k: Optional[int] = None,
+        hybrid_alpha: float = 0.5,
+        filter_filenames: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Agentic query execution with iterative decide-act loop."""
         if not query or not query.strip():
@@ -1095,7 +1140,15 @@ class RAGOrchestrator:
                 retrieve_top_k = top_k
             retrieve_top_k = max(1, min(retrieve_top_k, 50))
 
-            search_results = self.vector_store.search(working_query, top_k=retrieve_top_k)
+            search_results = self._retrieve_documents(
+                query=working_query,
+                top_k=retrieve_top_k,
+                retrieval_mode=retrieval_mode,
+                dense_top_k=dense_top_k,
+                sparse_top_k=sparse_top_k,
+                hybrid_alpha=hybrid_alpha,
+                filter_filenames=filter_filenames,
+            )
 
             if use_reranking and len(search_results) > 1:
                 try:
@@ -1142,6 +1195,7 @@ class RAGOrchestrator:
                 "metadata": {
                     "agentic": True,
                     "agent_steps": trace,
+                    "retrieval_mode": retrieval_mode,
                 },
             }
 
@@ -1202,8 +1256,158 @@ class RAGOrchestrator:
             "metadata": {
                 "agentic": True,
                 "agent_steps": trace,
+                "retrieval_mode": retrieval_mode,
             },
         }
+
+    def _retrieve_documents(
+        self,
+        query: str,
+        top_k: int,
+        retrieval_mode: str = "hybrid",
+        dense_top_k: Optional[int] = None,
+        sparse_top_k: Optional[int] = None,
+        hybrid_alpha: float = 0.5,
+        filter_filenames: Optional[List[str]] = None,
+    ):
+        """Retrieve chunks using vector, BM25, or hybrid fusion."""
+        mode = (retrieval_mode or "hybrid").strip().lower()
+        if mode not in {"vector", "bm25", "hybrid"}:
+            mode = "hybrid"
+
+        dense_k = dense_top_k or top_k
+        sparse_k = sparse_top_k or top_k
+
+        # one-time bootstrap: if BM25 is empty but vector index has data, sync from vector store
+        self._bootstrap_bm25_if_needed()
+
+        vector_results = []
+        sparse_results = []
+
+        # Chroma where supports exact equality. If multiple filenames, post-filter in memory.
+        filter_metadata = None
+        if filter_filenames and len(filter_filenames) == 1:
+            filter_metadata = {"filename": filter_filenames[0]}
+
+        if mode in {"vector", "hybrid"}:
+            vector_results = self.vector_store.search(
+                query=query,
+                top_k=max(top_k, dense_k),
+                filter_metadata=filter_metadata,
+            )
+
+        if mode in {"bm25", "hybrid"}:
+            sparse_results = self.bm25_index.search(
+                query=query,
+                top_k=max(top_k, sparse_k),
+                filter_metadata=filter_metadata,
+            )
+
+        if filter_filenames and len(filter_filenames) > 1:
+            allowed = set(filter_filenames)
+            vector_results = [r for r in vector_results if getattr(r, "metadata", {}).get("filename") in allowed]
+            sparse_results = [r for r in sparse_results if (r.get("metadata", {}) or {}).get("filename") in allowed]
+
+        if mode == "vector":
+            return vector_results[:top_k]
+        if mode == "bm25":
+            return self._dict_results_to_search_results(sparse_results[:top_k])
+
+        # hybrid fusion with weighted RRF
+        fused_dicts = self._fuse_rankings_rrf(
+            vector_results=vector_results,
+            sparse_results=sparse_results,
+            top_k=top_k,
+            alpha=hybrid_alpha,
+        )
+        return self._dict_results_to_search_results(fused_dicts)
+
+    def _fuse_rankings_rrf(self, vector_results, sparse_results, top_k: int, alpha: float = 0.5):
+        """Fuse vector + sparse rankings with weighted reciprocal rank fusion."""
+        alpha = max(0.0, min(1.0, float(alpha)))
+        w_dense = alpha
+        w_sparse = 1.0 - alpha
+        k = 60.0  # standard RRF constant
+
+        merged: Dict[str, Dict[str, Any]] = {}
+
+        for rank, result in enumerate(vector_results, start=1):
+            doc_id = getattr(result, "document_id", "") or self._make_fallback_doc_id(
+                getattr(result, "content", ""),
+                getattr(result, "metadata", {}) or {},
+            )
+            score = w_dense * (1.0 / (k + rank))
+            entry = merged.setdefault(
+                doc_id,
+                {
+                    "document_id": doc_id,
+                    "content": getattr(result, "content", ""),
+                    "metadata": getattr(result, "metadata", {}) or {},
+                    "score": 0.0,
+                },
+            )
+            entry["score"] += score
+
+        for rank, result in enumerate(sparse_results, start=1):
+            doc_id = result.get("document_id", "") or self._make_fallback_doc_id(
+                result.get("content", ""),
+                result.get("metadata", {}) or {},
+            )
+            score = w_sparse * (1.0 / (k + rank))
+            entry = merged.setdefault(
+                doc_id,
+                {
+                    "document_id": doc_id,
+                    "content": result.get("content", ""),
+                    "metadata": result.get("metadata", {}) or {},
+                    "score": 0.0,
+                },
+            )
+            entry["score"] += score
+
+        ranked = list(merged.values())
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+        return ranked[:top_k]
+
+    def _dict_results_to_search_results(self, results: List[Dict[str, Any]]):
+        from src.retrieval.vector_store import SearchResult
+
+        converted = []
+        for r in results:
+            converted.append(
+                SearchResult(
+                    content=r.get("content", ""),
+                    metadata=r.get("metadata", {}) or {},
+                    score=float(r.get("score", 0.0)),
+                    document_id=r.get("document_id", ""),
+                )
+            )
+        return converted
+
+    def _make_fallback_doc_id(self, content: str, metadata: Dict[str, Any]) -> str:
+        raw = (
+            content
+            + str(metadata.get("filename", ""))
+            + str(metadata.get("page_number", ""))
+            + str(metadata.get("chunk_id", ""))
+        )
+        return uuid.uuid5(uuid.NAMESPACE_DNS, raw).hex
+
+    def _bootstrap_bm25_if_needed(self):
+        if self._bm25_bootstrapped:
+            return
+        self._bm25_bootstrapped = True
+
+        if self.bm25_index.size() > 0:
+            return
+
+        try:
+            docs = self.vector_store.get_all_documents()
+            if docs:
+                added = self.bm25_index.add_documents(docs)
+                logger.info(f"Bootstrapped BM25 with {added} chunks from vector store")
+        except Exception as e:
+            logger.warning(f"BM25 bootstrap skipped: {e}")
 
     def _agent_decide(
         self,
@@ -1332,6 +1536,7 @@ Answer:"""
         return {  
             "conversations": len(self._conversations),  
             "vector_store": vector_stats,  
+            "bm25_chunks": self.bm25_index.size(),
             "components": {  
                 "embedder": self._embedder is not None,  
                 "vector_store": self._vector_store is not None,  
@@ -1348,4 +1553,5 @@ Answer:"""
         Returns:  
             Dict with status  
         """  
+        self.bm25_index.clear()
         return self.vector_store.clear()  
