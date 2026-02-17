@@ -7,3 +7,9 @@ logs/
 .env
 .vscode/
 Abhishek_Master_Thesis_draft_1.pdf
+
+create_csv.py
+eval_set.csv
+quick_eval.py
+quick_ragas_eval.py
+ragas_rows.json
