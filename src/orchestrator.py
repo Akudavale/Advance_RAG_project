@@ -677,6 +677,50 @@ class RAGOrchestrator:
           
         logger.info(f"Created conversation: {conversation_id}")  
         return conversation_id  
+
+    def _ensure_conversation(self, conversation_id: Optional[str]) -> None:
+        """Ensure the given conversation ID exists in in-memory state."""
+        if not conversation_id:
+            return
+
+        if conversation_id in self._conversations:
+            return
+
+        self._conversations[conversation_id] = {
+            "id": conversation_id,
+            "created_at": datetime.now().isoformat(),
+            "messages": [],
+            "documents": [],
+        }
+        self._conversation_documents.setdefault(conversation_id, [])
+        logger.info(f"Initialized conversation state: {conversation_id}")
+
+    def _resolve_filter_filenames(
+        self,
+        conversation_id: Optional[str],
+        filter_filenames: Optional[List[str]],
+    ) -> Optional[List[str]]:
+        """
+        Resolve retrieval filename filters.
+
+        Priority:
+        1) explicit filter_filenames from caller
+        2) conversation-associated documents when conversation_id is known
+        3) None (no filtering) when no conversation context exists
+        """
+        if filter_filenames is not None:
+            cleaned = [f.strip() for f in filter_filenames if isinstance(f, str) and f.strip()]
+            # Explicit empty list should intentionally mean "no docs".
+            return cleaned
+
+        if not conversation_id:
+            return None
+
+        if conversation_id in self._conversations:
+            docs = self._conversations[conversation_id].get("documents", []) or []
+            return [d for d in docs if isinstance(d, str) and d.strip()]
+
+        return []
       
     def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:  
         """  
@@ -735,9 +779,10 @@ class RAGOrchestrator:
                 logger.info(f"Document '{filename}' already indexed, skipping processing")  
                   
                 # Still associate with conversation if provided  
-                if conversation_id and conversation_id in self._conversations:  
-                    if filename not in self._conversations[conversation_id]["documents"]:  
-                        self._conversations[conversation_id]["documents"].append(filename)  
+                if conversation_id:
+                    self._ensure_conversation(conversation_id)
+                    if filename not in self._conversations[conversation_id]["documents"]:
+                        self._conversations[conversation_id]["documents"].append(filename)
                   
                 return {  
                     "status": "success",  
@@ -770,13 +815,7 @@ class RAGOrchestrator:
               
             # Associate with conversation  
             if conversation_id:  
-                if conversation_id not in self._conversations:  
-                    self.create_conversation()  
-                    # Update the ID to match  
-                    self._conversations[conversation_id] = self._conversations.pop(  
-                        list(self._conversations.keys())[-1]  
-                    )  
-                    self._conversations[conversation_id]["id"] = conversation_id  
+                self._ensure_conversation(conversation_id)
                   
                 if filename not in self._conversations[conversation_id]["documents"]:  
                     self._conversations[conversation_id]["documents"].append(filename)  
@@ -883,6 +922,11 @@ class RAGOrchestrator:
             Dict with answer and sources  
         """  
         try:  
+            effective_filter_filenames = self._resolve_filter_filenames(
+                conversation_id=conversation_id,
+                filter_filenames=filter_filenames,
+            )
+
             if agentic:
                 print("Agentic RAG...")  
                 return self._query_agentic(
@@ -900,7 +944,7 @@ class RAGOrchestrator:
                     dense_top_k=dense_top_k,
                     sparse_top_k=sparse_top_k,
                     hybrid_alpha=hybrid_alpha,
-                    filter_filenames=filter_filenames,
+                    filter_filenames=effective_filter_filenames,
                 )
 
             # Validate query  
@@ -952,7 +996,7 @@ class RAGOrchestrator:
                 dense_top_k=dense_top_k,
                 sparse_top_k=sparse_top_k,
                 hybrid_alpha=hybrid_alpha,
-                filter_filenames=filter_filenames,
+                filter_filenames=effective_filter_filenames,
             )
               
             if not search_results:  
@@ -1006,12 +1050,7 @@ class RAGOrchestrator:
               
             # Store in conversation  
             if conversation_id:  
-                if conversation_id not in self._conversations:  
-                    self.create_conversation()  
-                    self._conversations[conversation_id] = self._conversations.pop(  
-                        list(self._conversations.keys())[-1]  
-                    )  
-                    self._conversations[conversation_id]["id"] = conversation_id  
+                self._ensure_conversation(conversation_id)
                   
                 self._conversations[conversation_id]["messages"].append({  
                     "role": "user",  
@@ -1072,6 +1111,11 @@ class RAGOrchestrator:
         """Agentic query execution with iterative decide-act loop."""
         if not query or not query.strip():
             return {"status": "error", "message": "Empty query"}
+
+        effective_filter_filenames = self._resolve_filter_filenames(
+            conversation_id=conversation_id,
+            filter_filenames=filter_filenames,
+        )
 
         original_query = query.strip()
         working_query = original_query
@@ -1147,7 +1191,7 @@ class RAGOrchestrator:
                 dense_top_k=dense_top_k,
                 sparse_top_k=sparse_top_k,
                 hybrid_alpha=hybrid_alpha,
-                filter_filenames=filter_filenames,
+                filter_filenames=effective_filter_filenames,
             )
 
             if use_reranking and len(search_results) > 1:
@@ -1215,12 +1259,7 @@ class RAGOrchestrator:
         answer = self.llm_generator.generate(prompt)
 
         if conversation_id:
-            if conversation_id not in self._conversations:
-                self.create_conversation()
-                self._conversations[conversation_id] = self._conversations.pop(
-                    list(self._conversations.keys())[-1]
-                )
-                self._conversations[conversation_id]["id"] = conversation_id
+            self._ensure_conversation(conversation_id)
 
             self._conversations[conversation_id]["messages"].append(
                 {
@@ -1277,6 +1316,9 @@ class RAGOrchestrator:
 
         dense_k = dense_top_k or top_k
         sparse_k = sparse_top_k or top_k
+
+        if filter_filenames is not None and len(filter_filenames) == 0:
+            return []
 
         # one-time bootstrap: if BM25 is empty but vector index has data, sync from vector store
         self._bootstrap_bm25_if_needed()

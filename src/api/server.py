@@ -120,7 +120,8 @@ class QueryRequest(BaseModel):
         json_schema_extra={  
             "example": {  
                 "query": "What is this document about?",  
-                "conversation_id": None  
+                "conversation_id": "enter conversation id",
+                "agentic": True,
             }  
         }  
     )  

@@ -246,8 +246,9 @@ if __name__ == "__main__":
 
     call_config = {
         "PDF_PATHS": [
-            "Abhishek_Master_Thesis_draft_1.pdf",
-            "resume.pdf"
+            #"Abhishek_Master_Thesis_draft_1.pdf",
+            # "resume.pdf"
+            r"C:\\Users\\I012606\\Desktop\\Thesis\\papers\\AD in unstructed environment.pdf"
         ],
         "top_k": 20,  # number of top documents to retrieve
         "rerank_top_k": 10,  # number of top documents to re-rank
