@@ -1,522 +1,3 @@
-# """  
-# src/orchestrator.py  
-# -------------------  
-# Main RAG orchestrator that coordinates all components.  
-# """  
-  
-# import logging  
-# import os  
-# from typing import Dict, List, Any, Optional  
-# from datetime import datetime  
-  
-# logger = logging.getLogger(__name__)  
-  
-  
-# class RAGOrchestrator:  
-#     """  
-#     Main orchestrator for the RAG pipeline.  
-      
-#     Coordinates:  
-#     - Document processing and indexing  
-#     - Query processing and retrieval  
-#     - Answer generation  
-#     - Conversation memory  
-#     - Evaluation  
-#     """  
-      
-#     def __init__(self, config=None):  
-#         """  
-#         Initialize the RAG orchestrator.  
-          
-#         Args:  
-#             config: Configuration object  
-#         """  
-#         from config.config import Config  
-          
-#         self.config = config or Config()  
-          
-#         # Validate configuration  
-#         validation = self.config.validate()  
-#         if not validation["valid"]:  
-#             logger.warning(f"Configuration issues: {validation['issues']}")  
-          
-#         # Initialize components (lazy loading where possible)  
-#         self._embedder = None  
-#         self._vector_store = None  
-#         self._reranker = None  
-#         self._query_rewriter = None  
-#         self._llm_generator = None  
-#         self._pdf_processor = None  
-#         self._conversation_memory = None  
-#         self._memory_retriever = None  
-#         self._memory_updater = None  
-#         self._prompt_optimizer = None  
-#         self._evaluator = None  
-          
-#         # Document tracking  
-#         self._document_registry: Dict[str, Dict[str, Any]] = {}  
-          
-#         logger.info("RAGOrchestrator initialized")  
-      
-#     # -------------------------------------------------------------------------  
-#     # Lazy-loaded component properties  
-#     # -------------------------------------------------------------------------  
-      
-#     @property  
-#     def embedder(self):  
-#         """Get shared embedder instance."""  
-#         if self._embedder is None:  
-#             from src.embedding.embedder import get_shared_embedder  
-#             self._embedder = get_shared_embedder(self.config)  
-#         return self._embedder  
-      
-#     @property  
-#     def vector_store(self):  
-#         """Get vector store instance."""  
-#         if self._vector_store is None:  
-#             from src.retrieval.vector_store import VectorStore  
-#             self._vector_store = VectorStore(self.config)  
-#         return self._vector_store  
-      
-#     @property  
-#     def reranker(self):  
-#         """Get reranker instance."""  
-#         if self._reranker is None:  
-#             from src.retrieval.reranker import Reranker  
-#             self._reranker = Reranker(self.config)  
-#         return self._reranker  
-      
-#     @property  
-#     def query_rewriter(self):  
-#         """Get query rewriter instance."""  
-#         if self._query_rewriter is None:  
-#             from src.retrieval.query_rewriter import QueryRewriter  
-#             self._query_rewriter = QueryRewriter(self.config)  
-#         return self._query_rewriter  
-      
-#     @property  
-#     def llm_generator(self):  
-#         """Get LLM generator instance."""  
-#         if self._llm_generator is None:  
-#             from src.answer_generator.llm_generator import LLMGenerator  
-#             self._llm_generator = LLMGenerator(self.config)  
-#         return self._llm_generator  
-      
-#     @property  
-#     def pdf_processor(self):  
-#         """Get PDF processor instance."""  
-#         if self._pdf_processor is None:  
-#             from src.data_processing.pdf_processor import PDFProcessor  
-#             self._pdf_processor = PDFProcessor(self.config)  
-#         return self._pdf_processor  
-      
-#     @property  
-#     def conversation_memory(self):  
-#         """Get conversation memory instance."""  
-#         if self._conversation_memory is None:  
-#             from src.memory.conversation_memory import ConversationMemory  
-#             self._conversation_memory = ConversationMemory(self.config)  
-#         return self._conversation_memory  
-      
-#     @property  
-#     def memory_retriever(self):  
-#         """Get memory retriever instance."""  
-#         if self._memory_retriever is None:  
-#             from src.memory.memory_retriever import MemoryRetriever  
-#             self._memory_retriever = MemoryRetriever(self.config, self.embedder)  
-#         return self._memory_retriever  
-      
-#     @property  
-#     def memory_updater(self):  
-#         """Get memory updater instance."""  
-#         if self._memory_updater is None:  
-#             from src.memory.memory_updater import MemoryUpdater  
-#             self._memory_updater = MemoryUpdater(  
-#                 self.config,  
-#                 self.conversation_memory,  
-#                 self.memory_retriever  
-#             )  
-#         return self._memory_updater  
-      
-#     @property  
-#     def prompt_optimizer(self):  
-#         """Get prompt optimizer instance."""  
-#         if self._prompt_optimizer is None:  
-#             from src.prompts.prompt_optimizer import PromptOptimizer  
-#             self._prompt_optimizer = PromptOptimizer(self.config)  
-#         return self._prompt_optimizer  
-      
-#     @property  
-#     def evaluator(self):  
-#         """Get evaluator instance."""  
-#         if self._evaluator is None:  
-#             from src.evaluation.evaluator import Evaluator  
-#             self._evaluator = Evaluator(self.config)  
-#         return self._evaluator  
-      
-#     # -------------------------------------------------------------------------  
-#     # Conversation Management (API Server interface)  
-#     # -------------------------------------------------------------------------  
-      
-#     def create_conversation(self, metadata: Optional[Dict[str, Any]] = None) -> str:  
-#         """  
-#         Create a new conversation.  
-          
-#         Args:  
-#             metadata: Optional conversation metadata  
-              
-#         Returns:  
-#             Conversation ID  
-#         """  
-#         return self.conversation_memory.create_conversation(metadata)  
-      
-#     def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:  
-#         """  
-#         Get conversation history.  
-          
-#         Args:  
-#             conversation_id: Conversation ID  
-              
-#         Returns:  
-#             Conversation history  
-#         """  
-#         return self.conversation_memory.get_conversation_history(conversation_id)  
-      
-#     # -------------------------------------------------------------------------  
-#     # Document Processing  
-#     # -------------------------------------------------------------------------  
-      
-#     def process_document(  
-#         self,  
-#         conversation_id: str,  
-#         file_path: str  
-#     ) -> Dict[str, Any]:  
-#         """  
-#         Process and index a document.  
-          
-#         Args:  
-#             conversation_id: Conversation ID to associate with  
-#             file_path: Path to PDF file  
-              
-#         Returns:  
-#             Processing result  
-#         """  
-#         try:  
-#             # Validate file exists  
-#             if not os.path.exists(file_path):  
-#                 return {  
-#                     "status": "error",  
-#                     "message": f"File not found: {file_path}"  
-#                 }  
-              
-#             # Process PDF  
-#             chunks = self.pdf_processor.process(file_path)  
-              
-#             if not chunks:  
-#                 return {  
-#                     "status": "error",  
-#                     "message": "No content extracted from document"  
-#                 }  
-              
-#             # Generate embeddings  
-#             contents = [chunk["content"] for chunk in chunks]  
-#             embeddings = self.embedder.embed_documents(contents)  
-              
-#             # Add to vector store  
-#             doc_ids = self.vector_store.add_documents(chunks, embeddings)  
-              
-#             # Register document  
-#             filename = os.path.basename(file_path)  
-#             self._document_registry[filename] = {  
-#                 "conversation_id": conversation_id,  
-#                 "file_path": file_path,  
-#                 "chunk_count": len(chunks),  
-#                 "doc_ids": doc_ids,  
-#                 "processed_at": datetime.now().isoformat()  
-#             }  
-              
-#             logger.info(f"Processed document: {filename}, {len(chunks)} chunks")  
-              
-#             return {  
-#                 "status": "success",  
-#                 "document": {  
-#                     "filename": filename,  
-#                     "chunks": len(chunks)  
-#                 },  
-#                 "message": "Document processed successfully"  
-#             }  
-              
-#         except Exception as e:  
-#             logger.error(f"Document processing failed: {e}")  
-#             return {  
-#                 "status": "error",  
-#                 "message": str(e)  
-#             }  
-      
-#     # -------------------------------------------------------------------------  
-#     # Query Processing  
-#     # -------------------------------------------------------------------------  
-      
-#     def query(  
-#         self,  
-#         conversation_id: Optional[str],  
-#         query: str,  
-#         use_optimized_prompts: bool = True,  
-#         use_memory: bool = True,  
-#         use_reranking: bool = True,  
-#         use_query_rewriting: bool = False,  
-#         top_k: Optional[int] = None  
-#     ) -> Dict[str, Any]:  
-#         """  
-#         Process a user query and generate an answer.  
-          
-#         Args:  
-#             conversation_id: Conversation ID (optional)  
-#             query: User query  
-#             use_optimized_prompts: Whether to optimize prompts  
-#             use_memory: Whether to use conversation memory  
-#             use_reranking: Whether to rerank results  
-#             use_query_rewriting: Whether to rewrite query  
-#             top_k: Number of documents to retrieve  
-              
-#         Returns:  
-#             Query result with answer and metadata  
-#         """  
-#         try:  
-#             start_time = datetime.now()  
-              
-#             # Validate query  
-#             if not query or not query.strip():  
-#                 return {  
-#                     "status": "error",  
-#                     "message": "Empty query provided"  
-#                 }  
-              
-#             # Create conversation if needed  
-#             if not conversation_id:  
-#                 conversation_id = self.create_conversation()  
-              
-#             # Get retrieval parameters  
-#             top_k_retrieval = top_k or getattr(self.config, "TOP_K_RETRIEVAL", 20)  
-#             top_k_rerank = getattr(self.config, "TOP_K_RERANK", 5)  
-              
-#             # Step 1: Query rewriting (optional)  
-#             processed_query = query  
-#             rewrite_info = None  
-              
-#             if use_query_rewriting:  
-#                 rewrite_result = self.query_rewriter.rewrite(query)  
-#                 if rewrite_result.get("success"):  
-#                     processed_query = rewrite_result.get("rewritten_query", query)  
-#                     rewrite_info = rewrite_result  
-              
-#             # Step 2: Generate query embedding  
-#             query_embedding = self.embedder.embed_query(processed_query)  
-              
-#             # Step 3: Retrieve documents  
-#             retrieved_docs = self.vector_store.search(  
-#                 query_embedding=query_embedding,  
-#                 top_k=top_k_retrieval  
-#             )  
-              
-#             if not retrieved_docs:  
-#                 return {  
-#                     "status": "success",  
-#                     "conversation_id": conversation_id,  
-#                     "query": query,  
-#                     "answer": "I couldn't find any relevant information in the documents. Please make sure you've uploaded a document first.",  
-#                     "sources": [],  
-#                     "metadata": {  
-#                         "retrieval_count": 0,  
-#                         "processing_time_ms": (datetime.now() - start_time).total_seconds() * 1000  
-#                     }  
-#                 }  
-              
-#             # Step 4: Rerank documents (optional)  
-#             if use_reranking:  
-#                 reranked_docs = self.reranker.rerank(  
-#                     query=processed_query,  
-#                     documents=retrieved_docs,  
-#                     top_k=top_k_rerank  
-#                 )  
-#             else:  
-#                 reranked_docs = retrieved_docs[:top_k_rerank]  
-              
-#             # Step 5: Get memory context (optional)  
-#             memory_context = None  
-#             if use_memory and conversation_id:  
-#                 memory_context = self.conversation_memory.get_context_for_query(  
-#                     conversation_id=conversation_id,  
-#                     query=query  
-#                 )  
-              
-#             # Step 6: Optimize prompt (optional)  
-#             if use_optimized_prompts:  
-#                 optimized = self.prompt_optimizer.optimize_rag_prompt(  
-#                     query=query,  
-#                     documents=reranked_docs,  
-#                     memory_context=memory_context  
-#                 )  
-#                 final_docs = optimized["documents"]  
-#                 final_memory = optimized.get("memory_context")  
-#             else:  
-#                 final_docs = reranked_docs  
-#                 final_memory = memory_context  
-              
-#             # Step 7: Generate answer  
-#             answer = self.llm_generator.generate_answer(  
-#                 query=query,  
-#                 documents=final_docs,  
-#                 memory_context={"summary": final_memory} if isinstance(final_memory, str) else final_memory  
-#             )  
-              
-#             # Step 8: Update memory  
-#             if use_memory and conversation_id:  
-#                 self.memory_updater.add_interaction(  
-#                     conversation_id=conversation_id,  
-#                     user_message=query,  
-#                     assistant_message=answer  
-#                 )  
-              
-#             # Build response  
-#             processing_time = (datetime.now() - start_time).total_seconds() * 1000  
-              
-#             sources = [  
-#                 {  
-#                     "content": doc.get("content", "")[:200] + "...",  
-#                     "metadata": doc.get("metadata", {}),  
-#                     "score": doc.get("score", 0)  
-#                 }  
-#                 for doc in final_docs[:3]  
-#             ]  
-              
-#             return {  
-#                 "status": "success",  
-#                 "conversation_id": conversation_id,  
-#                 "query": query,  
-#                 "answer": answer,  
-#                 "sources": sources,  
-#                 "metadata": {  
-#                     "retrieval_count": len(retrieved_docs),  
-#                     "reranked_count": len(reranked_docs),  
-#                     "final_count": len(final_docs),  
-#                     "query_rewritten": rewrite_info is not None,  
-#                     "processing_time_ms": processing_time  
-#                 }  
-#             }  
-              
-#         except Exception as e:  
-#             logger.error(f"Query processing failed: {e}", exc_info=True)  
-#             return {  
-#                 "status": "error",  
-#                 "message": f"Query processing failed: {str(e)}"  
-#             }  
-      
-#     # -------------------------------------------------------------------------  
-#     # Advanced Query Methods  
-#     # -------------------------------------------------------------------------  
-      
-#     def query_with_self_critique(  
-#         self,  
-#         conversation_id: Optional[str],  
-#         query: str  
-#     ) -> Dict[str, Any]:  
-#         """  
-#         Query with self-critique for improved accuracy.  
-          
-#         Args:  
-#             conversation_id: Conversation ID  
-#             query: User query  
-              
-#         Returns:  
-#             Result with initial and improved answers  
-#         """  
-#         # First get documents  
-#         if not conversation_id:  
-#             conversation_id = self.create_conversation()  
-          
-#         query_embedding = self.embedder.embed_query(query)  
-#         retrieved_docs = self.vector_store.search(query_embedding, top_k=10)  
-#         reranked_docs = self.reranker.rerank(query, retrieved_docs, top_k=5)  
-          
-#         # Generate with self-critique  
-#         result = self.llm_generator.generate_with_self_critique(  
-#             query=query,  
-#             documents=reranked_docs  
-#         )  
-          
-#         return {  
-#             "status": "success",  
-#             "conversation_id": conversation_id,  
-#             "query": query,  
-#             "initial_answer": result["initial_answer"],  
-#             "critique": result["critique"],  
-#             "improved_answer": result["improved_answer"],  
-#             "sources": [  
-#                 {"content": d.get("content", "")[:200], "score": d.get("score", 0)}  
-#                 for d in reranked_docs[:3]  
-#             ]  
-#         }  
-      
-#     def query_with_sources(  
-#         self,  
-#         conversation_id: Optional[str],  
-#         query: str  
-#     ) -> Dict[str, Any]:  
-#         """  
-#         Query with detailed source attribution.  
-          
-#         Args:  
-#             conversation_id: Conversation ID  
-#             query: User query  
-              
-#         Returns:  
-#             Result with answer and source attributions  
-#         """  
-#         if not conversation_id:  
-#             conversation_id = self.create_conversation()  
-          
-#         query_embedding = self.embedder.embed_query(query)  
-#         retrieved_docs = self.vector_store.search(query_embedding, top_k=10)  
-#         reranked_docs = self.reranker.rerank(query, retrieved_docs, top_k=5)  
-          
-#         # Generate with source attribution  
-#         result = self.llm_generator.generate_with_source_attribution(  
-#             query=query,  
-#             documents=reranked_docs  
-#         )  
-          
-#         return {  
-#             "status": "success",  
-#             "conversation_id": conversation_id,  
-#             "query": query,  
-#             "answer": result["answer"],  
-#             "attributions": result["attributions"]  
-#         }  
-      
-#     # -------------------------------------------------------------------------  
-#     # Utility Methods  
-#     # -------------------------------------------------------------------------  
-      
-#     def get_stats(self) -> Dict[str, Any]:  
-#         """Get system statistics."""  
-#         return {  
-#             "vector_store": self.vector_store.get_stats(),  
-#             "documents_registered": len(self._document_registry),  
-#             "conversations": len(self.conversation_memory._conversations)  
-#         }  
-      
-#     def clear_all(self):  
-#         """Clear all data (use with caution)."""  
-#         self.vector_store.clear()  
-#         self._document_registry.clear()  
-#         logger.info("All data cleared")  
-
-
-
-
-
-
 """  
 src/orchestrator.py  
 -------------------  
@@ -526,8 +7,6 @@ Main RAG orchestrator with document deduplication support.
 import logging  
 import uuid  
 import os  
-import json
-import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime  
   
@@ -558,15 +37,14 @@ class RAGOrchestrator:
           
         # Initialize components lazily  
         self._embedder = None  
-        self._vector_store = None  
-        self._pdf_processor = None  
-        self._llm_generator = None  
+        self._storage_engine = None
+        self._langchain_rag_chain = None
+        self._langchain_indexing = None
+        self._langchain_retrieval = None
+        self._langgraph_agent = None
         self._reranker = None  
         self._query_rewriter = None  
         self._conversation_memory = None  
-        self._prompt_optimizer = None  
-        self._bm25_index = None
-        self._bm25_bootstrapped = False
           
         # Conversation storage  
         self._conversations: Dict[str, Dict[str, Any]] = {}  
@@ -588,29 +66,62 @@ class RAGOrchestrator:
             self._embedder = Embedder(self.config)  
         return self._embedder  
       
-    @property  
-    def vector_store(self):  
-        """Lazy load vector store."""  
-        if self._vector_store is None:  
-            from src.retrieval.vector_store import VectorStore  
-            self._vector_store = VectorStore(self.config, self.embedder)  
-        return self._vector_store  
+    @property
+    def storage_engine(self):
+        """Lazy load LangChain-native storage engine."""
+        if self._storage_engine is None:
+            from src.langchain_pipeline import LangChainStorageEngine
+
+            self._storage_engine = LangChainStorageEngine(
+                config=self.config,
+                embedder=self.embedder,
+                logger=logger,
+            )
+        return self._storage_engine
+
+    @property
+    def langchain_indexing(self):
+        """Lazy load LangChain-based indexing engine."""
+        if self._langchain_indexing is None:
+            from src.langchain_pipeline import LangChainIndexingEngine
+
+            self._langchain_indexing = LangChainIndexingEngine(self.config)
+        return self._langchain_indexing
       
-    @property  
-    def pdf_processor(self):  
-        """Lazy load PDF processor."""  
-        if self._pdf_processor is None:  
-            from src.data_processing.pdf_processor import PDFProcessor  
-            self._pdf_processor = PDFProcessor(self.config)  
-        return self._pdf_processor  
-      
-    @property  
-    def llm_generator(self):  
-        """Lazy load LLM generator."""  
-        if self._llm_generator is None:  
-            from src.answer_generator.llm_generator import LLMGenerator  
-            self._llm_generator = LLMGenerator(self.config)  
-        return self._llm_generator  
+    @property
+    def langchain_rag_chain(self):
+        """Lazy load LangChain-first RAG answer chain."""
+        if self._langchain_rag_chain is None:
+            from src.langchain_pipeline import LangChainRAGChain
+
+            self._langchain_rag_chain = LangChainRAGChain(self.config)
+        return self._langchain_rag_chain
+
+    @property
+    def langchain_retrieval(self):
+        """Lazy load LangChain-first retrieval engine."""
+        if self._langchain_retrieval is None:
+            from src.langchain_pipeline import LangChainRetrievalEngine
+
+            self._langchain_retrieval = LangChainRetrievalEngine(
+                storage=self.storage_engine,
+                logger=logger,
+            )
+        return self._langchain_retrieval
+
+    @property
+    def langgraph_agent(self):
+        """Lazy load LangGraph-based agent runner."""
+        if self._langgraph_agent is None:
+            from src.langchain_pipeline import LangGraphAgentRunner
+
+            self._langgraph_agent = LangGraphAgentRunner(
+                planner_llm=self.langchain_rag_chain.llm,
+                query_rewriter=self.query_rewriter,
+                retrieval_engine=self.langchain_retrieval,
+                logger=logger,
+            )
+        return self._langgraph_agent
       
     @property  
     def reranker(self):  
@@ -635,23 +146,6 @@ class RAGOrchestrator:
             from src.memory.conversation_memory import ConversationMemory  
             self._conversation_memory = ConversationMemory(self.config)  
         return self._conversation_memory  
-      
-    @property  
-    def prompt_optimizer(self):  
-        """Lazy load prompt optimizer."""  
-        if self._prompt_optimizer is None:  
-            from src.prompts.prompt_optimizer import PromptOptimizer  
-            self._prompt_optimizer = PromptOptimizer(self.config)  
-        return self._prompt_optimizer  
-
-    @property
-    def bm25_index(self):
-        """Lazy load BM25 index."""
-        if self._bm25_index is None:
-            from src.retrieval.bm25_index import BM25Index
-
-            self._bm25_index = BM25Index(self.config)
-        return self._bm25_index
       
     # -------------------------------------------  
     # Conversation management  
@@ -775,7 +269,7 @@ class RAGOrchestrator:
             filename = os.path.basename(file_path)  
               
             # Check if already indexed (unless force_reprocess)  
-            if not force_reprocess and self.vector_store.is_document_indexed(filename):  
+            if not force_reprocess and self.storage_engine.is_document_indexed(filename):  
                 logger.info(f"Document '{filename}' already indexed, skipping processing")  
                   
                 # Still associate with conversation if provided  
@@ -795,13 +289,14 @@ class RAGOrchestrator:
                 }  
               
             # If force_reprocess, delete existing  
-            if force_reprocess and self.vector_store.is_document_indexed(filename):  
+            if force_reprocess and self.storage_engine.is_document_indexed(filename):  
                 logger.info(f"Force reprocessing: deleting existing index for '{filename}'")  
-                self.vector_store.delete_document(filename)  
+                self.storage_engine.delete_document(filename)  
               
-            # Process the PDF (uses PDF cache if available)  
-            logger.info(f"Processing document: {filename}")  
-            chunks = self.pdf_processor.process(file_path)  
+            # Process document using LangChain ingestion pipeline.
+            logger.info(f"Processing document with LangChain indexing: {filename}")
+            lc_docs = self.langchain_indexing.load_pdf_documents(file_path)
+            chunks = self.langchain_indexing.to_chunk_dicts(lc_docs)
               
             if not chunks:  
                 return {  
@@ -810,8 +305,7 @@ class RAGOrchestrator:
                 }  
               
             # Add to vector store (with deduplication)  
-            result = self.vector_store.add_documents(chunks, skip_duplicates=True)  
-            self.bm25_index.add_documents(chunks)
+            result = self.storage_engine.add_documents(chunks, skip_duplicates=True)
               
             # Associate with conversation  
             if conversation_id:  
@@ -850,7 +344,7 @@ class RAGOrchestrator:
         Returns:  
             True if indexed  
         """  
-        return self.vector_store.is_document_indexed(filename)  
+        return self.storage_engine.is_document_indexed(filename)  
       
     def delete_document(self, filename: str) -> Dict[str, Any]:  
         """  
@@ -862,8 +356,7 @@ class RAGOrchestrator:
         Returns:  
             Dict with status  
         """  
-        result = self.vector_store.delete_document(filename)  
-        self.bm25_index.delete_document(filename)
+        result = self.storage_engine.delete_document(filename)  
           
         # Also clear from PDF cache  
         # Note: We don't delete PDF cache as it might be useful for reprocessing  
@@ -989,7 +482,7 @@ class RAGOrchestrator:
                     logger.warning(f"Query rewriting failed: {e}")
               
             # Retrieve documents
-            search_results = self._retrieve_documents(
+            search_results = self.langchain_retrieval.retrieve(
                 query=query,
                 top_k=top_k,
                 retrieval_mode=retrieval_mode,
@@ -997,6 +490,10 @@ class RAGOrchestrator:
                 sparse_top_k=sparse_top_k,
                 hybrid_alpha=hybrid_alpha,
                 filter_filenames=effective_filter_filenames,
+                use_reranking=use_reranking,
+                reranker=self.reranker if use_reranking else None,
+                rerank_query=query,
+                rerank_top_k=rerank_top_k,
             )
               
             if not search_results:  
@@ -1006,20 +503,6 @@ class RAGOrchestrator:
                     "sources": [],  
                     "query": original_query  
                 }  
-              
-            # Optionally rerank  
-            if use_reranking and len(search_results) > 1:  
-                try:  
-                    search_results = self.reranker.rerank(  
-                        query=query,  
-                        results=search_results,  
-                        top_k=rerank_top_k  
-                    )  
-                except Exception as e:  
-                    logger.warning(f"Reranking failed: {e}")  
-                    search_results = search_results[:rerank_top_k]  
-            else:  
-                search_results = search_results[:rerank_top_k]  
               
             # Prepare context for LLM  
             context_docs = []  
@@ -1031,22 +514,12 @@ class RAGOrchestrator:
                     "score": result.score  
                 })  
               
-            # Build prompt  
-            if use_optimized_prompts:  
-                try:  
-                    prompt = self.prompt_optimizer.build_prompt(  
-                        query=original_query,  
-                        context_docs=context_docs,  
-                        conversation_history=conversation_context  
-                    )  
-                except Exception as e:  
-                    logger.warning(f"Prompt optimization failed: {e}")  
-                    prompt = self._build_simple_prompt(original_query, context_docs)  
-            else:  
-                prompt = self._build_simple_prompt(original_query, context_docs)  
-              
-            # Generate answer  
-            answer = self.llm_generator.generate(prompt)  
+            # Generate answer using the LangChain pipeline.
+            answer = self.langchain_rag_chain.invoke(
+                query=original_query,
+                context_docs=context_docs,
+                conversation_history=conversation_context if use_memory else None,
+            )
               
             # Store in conversation  
             if conversation_id:  
@@ -1108,7 +581,7 @@ class RAGOrchestrator:
         hybrid_alpha: float = 0.5,
         filter_filenames: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Agentic query execution with iterative decide-act loop."""
+        """Agentic query execution via LangGraph decide-act loop."""
         if not query or not query.strip():
             return {"status": "error", "message": "Empty query"}
 
@@ -1118,11 +591,7 @@ class RAGOrchestrator:
         )
 
         original_query = query.strip()
-        working_query = original_query
-        rewritten_query = None
-        max_steps = max(1, int(agent_max_steps))
 
-        # Get conversation context once; the planner uses this for decisions.
         conversation_context: List[Dict[str, Any]] = []
         if use_memory and conversation_id:
             history = self.get_conversation_history(conversation_id)
@@ -1130,104 +599,26 @@ class RAGOrchestrator:
                 messages = history["conversation"].get("messages", [])
                 conversation_context = messages[-6:]
 
-        context_docs: List[Dict[str, Any]] = []
-        sources: List[Dict[str, Any]] = []
-        trace: List[Dict[str, Any]] = []
+        graph_out = self.langgraph_agent.run(
+            query=original_query,
+            conversation_context=conversation_context,
+            use_query_rewriting=use_query_rewriting,
+            method=method,
+            top_k=top_k,
+            agent_max_steps=agent_max_steps,
+            retrieval_mode=retrieval_mode,
+            dense_top_k=dense_top_k,
+            sparse_top_k=sparse_top_k,
+            hybrid_alpha=hybrid_alpha,
+            filter_filenames=effective_filter_filenames,
+            use_reranking=use_reranking,
+            reranker=self.reranker if use_reranking else None,
+            rerank_top_k=rerank_top_k,
+        )
 
-        for step in range(1, max_steps + 1):
-            decision = self._agent_decide(
-                original_query=original_query,
-                working_query=working_query,
-                has_context=bool(context_docs),
-                step=step,
-                max_steps=max_steps,
-                use_query_rewriting=use_query_rewriting,
-                default_method=method,
-                default_top_k=top_k,
-            )
-
-            action = str(decision.get("action", "retrieve")).strip().lower()
-
-            if action == "rewrite" and use_query_rewriting:
-                rewrite_method = str(decision.get("method", method)).strip().lower() or method
-                rewrite_result = self.query_rewriter.rewrite(
-                    query=working_query,
-                    context=conversation_context,
-                    method=rewrite_method,
-                )
-                next_query = rewrite_result.get("rewritten_query", working_query) or working_query
-                next_query = next_query.strip()
-
-                if next_query and next_query != working_query:
-                    rewritten_query = next_query
-                    working_query = next_query
-
-                trace.append(
-                    {
-                        "step": step,
-                        "action": "rewrite",
-                        "method": rewrite_method,
-                        "success": bool(rewrite_result.get("success")),
-                    }
-                )
-                continue
-
-            if action == "answer" and context_docs:
-                trace.append({"step": step, "action": "answer", "reason": "sufficient_context"})
-                break
-
-            # Default action: retrieve.
-            retrieve_top_k = decision.get("top_k", top_k)
-            try:
-                retrieve_top_k = int(retrieve_top_k)
-            except Exception:
-                retrieve_top_k = top_k
-            retrieve_top_k = max(1, min(retrieve_top_k, 50))
-
-            search_results = self._retrieve_documents(
-                query=working_query,
-                top_k=retrieve_top_k,
-                retrieval_mode=retrieval_mode,
-                dense_top_k=dense_top_k,
-                sparse_top_k=sparse_top_k,
-                hybrid_alpha=hybrid_alpha,
-                filter_filenames=effective_filter_filenames,
-            )
-
-            if use_reranking and len(search_results) > 1:
-                try:
-                    search_results = self.reranker.rerank(
-                        query=working_query,
-                        results=search_results,
-                        top_k=rerank_top_k,
-                    )
-                except Exception as e:
-                    logger.warning(f"Agentic reranking failed: {e}")
-                    search_results = search_results[:rerank_top_k]
-            else:
-                search_results = search_results[:rerank_top_k]
-
-            context_docs = [
-                {
-                    "index": i + 1,
-                    "content": result.content,
-                    "metadata": result.metadata,
-                    "score": result.score,
-                }
-                for i, result in enumerate(search_results)
-            ]
-
-            trace.append(
-                {
-                    "step": step,
-                    "action": "retrieve",
-                    "query_used": working_query,
-                    "retrieved": len(context_docs),
-                }
-            )
-
-            if context_docs and action == "answer":
-                break
+        context_docs: List[Dict[str, Any]] = graph_out.get("context_docs", []) or []
+        trace: List[Dict[str, Any]] = graph_out.get("trace", []) or []
+        rewritten_query = graph_out.get("rewritten_query")
 
         if not context_docs:
             return {
@@ -1243,20 +634,12 @@ class RAGOrchestrator:
                 },
             }
 
-        if use_optimized_prompts:
-            try:
-                prompt = self.prompt_optimizer.build_prompt(
-                    query=original_query,
-                    context_docs=context_docs,
-                    conversation_history=conversation_context,
-                )
-            except Exception as e:
-                logger.warning(f"Agentic prompt optimization failed: {e}")
-                prompt = self._build_simple_prompt(original_query, context_docs)
-        else:
-            prompt = self._build_simple_prompt(original_query, context_docs)
-
-        answer = self.llm_generator.generate(prompt)
+        sources: List[Dict[str, Any]] = []
+        answer = self.langchain_rag_chain.invoke(
+            query=original_query,
+            context_docs=context_docs,
+            conversation_history=conversation_context if use_memory else None,
+        )
 
         if conversation_id:
             self._ensure_conversation(conversation_id)
@@ -1299,269 +682,6 @@ class RAGOrchestrator:
             },
         }
 
-    def _retrieve_documents(
-        self,
-        query: str,
-        top_k: int,
-        retrieval_mode: str = "hybrid",
-        dense_top_k: Optional[int] = None,
-        sparse_top_k: Optional[int] = None,
-        hybrid_alpha: float = 0.5,
-        filter_filenames: Optional[List[str]] = None,
-    ):
-        """Retrieve chunks using vector, BM25, or hybrid fusion."""
-        mode = (retrieval_mode or "hybrid").strip().lower()
-        if mode not in {"vector", "bm25", "hybrid"}:
-            mode = "hybrid"
-
-        dense_k = dense_top_k or top_k
-        sparse_k = sparse_top_k or top_k
-
-        if filter_filenames is not None and len(filter_filenames) == 0:
-            return []
-
-        # one-time bootstrap: if BM25 is empty but vector index has data, sync from vector store
-        self._bootstrap_bm25_if_needed()
-
-        vector_results = []
-        sparse_results = []
-
-        # Chroma where supports exact equality. If multiple filenames, post-filter in memory.
-        filter_metadata = None
-        if filter_filenames and len(filter_filenames) == 1:
-            filter_metadata = {"filename": filter_filenames[0]}
-
-        if mode in {"vector", "hybrid"}:
-            vector_results = self.vector_store.search(
-                query=query,
-                top_k=max(top_k, dense_k),
-                filter_metadata=filter_metadata,
-            )
-
-        if mode in {"bm25", "hybrid"}:
-            sparse_results = self.bm25_index.search(
-                query=query,
-                top_k=max(top_k, sparse_k),
-                filter_metadata=filter_metadata,
-            )
-
-        if filter_filenames and len(filter_filenames) > 1:
-            allowed = set(filter_filenames)
-            vector_results = [r for r in vector_results if getattr(r, "metadata", {}).get("filename") in allowed]
-            sparse_results = [r for r in sparse_results if (r.get("metadata", {}) or {}).get("filename") in allowed]
-
-        if mode == "vector":
-            return vector_results[:top_k]
-        if mode == "bm25":
-            return self._dict_results_to_search_results(sparse_results[:top_k])
-
-        # hybrid fusion with weighted RRF
-        fused_dicts = self._fuse_rankings_rrf(
-            vector_results=vector_results,
-            sparse_results=sparse_results,
-            top_k=top_k,
-            alpha=hybrid_alpha,
-        )
-        return self._dict_results_to_search_results(fused_dicts)
-
-    def _fuse_rankings_rrf(self, vector_results, sparse_results, top_k: int, alpha: float = 0.5):
-        """Fuse vector + sparse rankings with weighted reciprocal rank fusion."""
-        alpha = max(0.0, min(1.0, float(alpha)))
-        w_dense = alpha
-        w_sparse = 1.0 - alpha
-        k = 60.0  # standard RRF constant
-
-        merged: Dict[str, Dict[str, Any]] = {}
-
-        for rank, result in enumerate(vector_results, start=1):
-            doc_id = getattr(result, "document_id", "") or self._make_fallback_doc_id(
-                getattr(result, "content", ""),
-                getattr(result, "metadata", {}) or {},
-            )
-            score = w_dense * (1.0 / (k + rank))
-            entry = merged.setdefault(
-                doc_id,
-                {
-                    "document_id": doc_id,
-                    "content": getattr(result, "content", ""),
-                    "metadata": getattr(result, "metadata", {}) or {},
-                    "score": 0.0,
-                },
-            )
-            entry["score"] += score
-
-        for rank, result in enumerate(sparse_results, start=1):
-            doc_id = result.get("document_id", "") or self._make_fallback_doc_id(
-                result.get("content", ""),
-                result.get("metadata", {}) or {},
-            )
-            score = w_sparse * (1.0 / (k + rank))
-            entry = merged.setdefault(
-                doc_id,
-                {
-                    "document_id": doc_id,
-                    "content": result.get("content", ""),
-                    "metadata": result.get("metadata", {}) or {},
-                    "score": 0.0,
-                },
-            )
-            entry["score"] += score
-
-        ranked = list(merged.values())
-        ranked.sort(key=lambda x: x["score"], reverse=True)
-        return ranked[:top_k]
-
-    def _dict_results_to_search_results(self, results: List[Dict[str, Any]]):
-        from src.retrieval.vector_store import SearchResult
-
-        converted = []
-        for r in results:
-            converted.append(
-                SearchResult(
-                    content=r.get("content", ""),
-                    metadata=r.get("metadata", {}) or {},
-                    score=float(r.get("score", 0.0)),
-                    document_id=r.get("document_id", ""),
-                )
-            )
-        return converted
-
-    def _make_fallback_doc_id(self, content: str, metadata: Dict[str, Any]) -> str:
-        raw = (
-            content
-            + str(metadata.get("filename", ""))
-            + str(metadata.get("page_number", ""))
-            + str(metadata.get("chunk_id", ""))
-        )
-        return uuid.uuid5(uuid.NAMESPACE_DNS, raw).hex
-
-    def _bootstrap_bm25_if_needed(self):
-        if self._bm25_bootstrapped:
-            return
-        self._bm25_bootstrapped = True
-
-        if self.bm25_index.size() > 0:
-            return
-
-        try:
-            docs = self.vector_store.get_all_documents()
-            if docs:
-                added = self.bm25_index.add_documents(docs)
-                logger.info(f"Bootstrapped BM25 with {added} chunks from vector store")
-        except Exception as e:
-            logger.warning(f"BM25 bootstrap skipped: {e}")
-
-    def _agent_decide(
-        self,
-        original_query: str,
-        working_query: str,
-        has_context: bool,
-        step: int,
-        max_steps: int,
-        use_query_rewriting: bool,
-        default_method: str,
-        default_top_k: int,
-    ) -> Dict[str, Any]:
-        """Decide next tool action for agentic loop."""
-        if step >= max_steps and has_context:
-            return {"action": "answer"}
-        if not has_context:
-            return {"action": "rewrite" if use_query_rewriting and step == 1 else "retrieve", "method": default_method, "top_k": default_top_k}
-
-        planner_prompt = (
-            "You are controlling a RAG agent. Choose one next action.\n"
-            "Return ONLY valid JSON with keys: action, method, top_k, reason.\n"
-            "Allowed action values: rewrite, retrieve, answer.\n"
-            "Allowed method values: expand, hyde, multi, decompose.\n"
-            f"Original query: {original_query}\n"
-            f"Current query: {working_query}\n"
-            f"Has retrieved context: {has_context}\n"
-            f"Step: {step}/{max_steps}\n"
-            "Rules:\n"
-            "1) If context already exists and appears sufficient, choose answer.\n"
-            "2) Choose retrieve if more evidence is needed.\n"
-            "3) Choose rewrite only if retrieval is likely improved by reframing.\n"
-            "4) Keep top_k between 3 and 20.\n"
-        )
-
-        try:
-            raw = self.llm_generator.generate(planner_prompt)
-            parsed = self._extract_json_object(raw)
-            if parsed:
-                action = str(parsed.get("action", "retrieve")).lower()
-                if action not in {"rewrite", "retrieve", "answer"}:
-                    action = "retrieve"
-                method = str(parsed.get("method", default_method)).lower()
-                if method not in {"expand", "hyde", "multi", "decompose"}:
-                    method = default_method
-                top_k = parsed.get("top_k", default_top_k)
-                try:
-                    top_k = int(top_k)
-                except Exception:
-                    top_k = default_top_k
-                return {
-                    "action": action,
-                    "method": method,
-                    "top_k": max(3, min(top_k, 20)),
-                    "reason": parsed.get("reason", ""),
-                }
-        except Exception as e:
-            logger.warning(f"Agent planner failed: {e}")
-
-        return {"action": "answer" if has_context else "retrieve", "method": default_method, "top_k": default_top_k}
-
-    def _extract_json_object(self, text: str) -> Dict[str, Any]:
-        """Extract first JSON object from model output."""
-        if not text:
-            return {}
-
-        text = text.strip()
-        try:
-            parsed = json.loads(text)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            pass
-
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            return {}
-
-        try:
-            parsed = json.loads(match.group(0))
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
-      
-    def _build_simple_prompt(  
-        self,  
-        query: str,  
-        context_docs: List[Dict[str, Any]]  
-    ) -> str:  
-        """  
-        Build a simple prompt without optimization.  
-          
-        Args:  
-            query: User query  
-            context_docs: Retrieved documents  
-              
-        Returns:  
-            Formatted prompt  
-        """  
-        context_text = "\n\n".join([  
-            f"[Document {doc['index']}]\n{doc['content']}"  
-            for doc in context_docs  
-        ])  
-          
-        return f"""Answer the following question based on the provided documents.  
-If the documents don't contain relevant information, say so.  
-  
-Documents:  
-{context_text}  
-  
-Question: {query}  
-  
-Answer:"""  
-      
     # -------------------------------------------  
     # Statistics and management  
     # -------------------------------------------  
@@ -1573,17 +693,17 @@ Answer:"""
         Returns:  
             Dict with statistics  
         """  
-        vector_stats = self.vector_store.get_stats()  
+        vector_stats = self.storage_engine.get_stats()  
           
         return {  
             "conversations": len(self._conversations),  
             "vector_store": vector_stats,  
-            "bm25_chunks": self.bm25_index.size(),
+            "bm25_chunks": self.storage_engine.bm25_size(),
             "components": {  
                 "embedder": self._embedder is not None,  
-                "vector_store": self._vector_store is not None,  
-                "pdf_processor": self._pdf_processor is not None,  
-                "llm_generator": self._llm_generator is not None,  
+                "storage_engine": self._storage_engine is not None,
+                "langchain_rag_chain": self._langchain_rag_chain is not None,
+                "langgraph_agent": self._langgraph_agent is not None,
                 "reranker": self._reranker is not None  
             }  
         }  
@@ -1595,5 +715,4 @@ Answer:"""
         Returns:  
             Dict with status  
         """  
-        self.bm25_index.clear()
-        return self.vector_store.clear()  
+        return self.storage_engine.clear()  

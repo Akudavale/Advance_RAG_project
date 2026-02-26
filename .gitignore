@@ -7,3 +7,6 @@ logs/
 .env
 .vscode/
 Abhishek_Master_Thesis_draft_1.pdf
+langvenv/
+outputs/
+evaluation_config.json

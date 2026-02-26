@@ -145,9 +145,16 @@ def main(call_config: dict):
 
             if query.lower() == 'stats':
                 stats = rag.get_stats()
-                model_info = rag.llm_generator.get_model_info()
+                llm_cfg = rag.config.get_llm_config()
+                provider = llm_cfg.get("provider", "unknown")
+                model_name = (
+                    llm_cfg.get("azure_deployment")
+                    or llm_cfg.get("model_name")
+                    or "unknown"
+                )
                 print("\nStats:")
-                print(f"  - Provider: {model_info.get('provider')}")
+                print(f"  - Provider: {provider}")
+                print(f"  - Model/Deployment: {model_name}")
                 print(f"  - Indexed documents: {stats['vector_store'].get('indexed_documents', 0)}")
                 print(f"  - Total vectors: {stats['vector_store'].get('total_vectors', 0)}")
                 print(f"  - Conversations: {stats['conversations']}")
@@ -246,7 +253,7 @@ if __name__ == "__main__":
 
     call_config = {
         "PDF_PATHS": [
-            #"Abhishek_Master_Thesis_draft_1.pdf",
+            "Abhishek_Master_Thesis_draft_1.pdf",
             # "resume.pdf"
             r"C:\\Users\\I012606\\Desktop\\Thesis\\papers\\AD in unstructed environment.pdf"
         ],
