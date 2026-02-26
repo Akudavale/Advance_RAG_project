@@ -95,6 +95,9 @@ class PDFProcessor:
         self.config = config or Config()  
         self.chunk_size = getattr(self.config, "CHUNK_SIZE", 1000)  
         self.chunk_overlap = getattr(self.config, "CHUNK_OVERLAP", 150)  
+        self.table_extraction_enabled = getattr(self.config, "PDF_TABLE_EXTRACTION_ENABLED", True)
+        self.table_min_cells = max(1, int(getattr(self.config, "PDF_TABLE_MIN_CELLS", 6)))
+        self.table_max_rows = max(1, int(getattr(self.config, "PDF_TABLE_MAX_ROWS", 60)))
           
         # Validate chunk parameters  
         if self.chunk_overlap >= self.chunk_size:  
@@ -156,6 +159,9 @@ class PDFProcessor:
         # Include chunk parameters (cache invalidates if these change)  
         hasher.update(str(self.chunk_size).encode())  
         hasher.update(str(self.chunk_overlap).encode())  
+        hasher.update(str(self.table_extraction_enabled).encode())
+        hasher.update(str(self.table_min_cells).encode())
+        hasher.update(str(self.table_max_rows).encode())
           
         # Include first 8KB of file content  
         with open(file_path, "rb") as f:  
@@ -310,6 +316,16 @@ class PDFProcessor:
           
         # Chunk the content  
         chunks = self._chunk_pages(pages, filename)  
+
+        # Optionally extract table chunks and append to text chunks.
+        table_chunks = self._extract_table_chunks(
+            file_path=file_path,
+            filename=filename,
+            start_chunk_id=len(chunks),
+        )
+        if table_chunks:
+            chunks.extend(table_chunks)
+            logger.info(f"Extracted {len(table_chunks)} table chunk(s) from {filename}")
           
         if not chunks:  
             logger.warning(f"No chunks created from {file_path}")  
@@ -321,6 +337,163 @@ class PDFProcessor:
         logger.info(f"Processed {file_path}: {len(pages)} pages -> {len(chunks)} chunks")  
           
         return [c.to_dict() for c in chunks]  
+
+    def _extract_table_chunks(
+        self,
+        file_path: str,
+        filename: str,
+        start_chunk_id: int = 0,
+    ) -> List[ProcessedChunk]:
+        """
+        Extract tables and generate table-aware chunks.
+
+        Notes:
+        - Uses pdfplumber for table extraction regardless of primary text extractor.
+        - Falls back silently if pdfplumber is unavailable.
+        """
+        if not self.table_extraction_enabled:
+            return []
+
+        try:
+            import pdfplumber
+        except Exception:
+            logger.debug("pdfplumber unavailable; skipping table extraction")
+            return []
+
+        chunks: List[ProcessedChunk] = []
+        chunk_id = start_chunk_id
+
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for page_number, page in enumerate(pdf.pages, start=1):
+                    tables = page.extract_tables() or []
+                    if not tables:
+                        continue
+
+                    caption_candidates = self._extract_table_caption_candidates(page)
+
+                    for table_index, raw_rows in enumerate(tables, start=1):
+                        normalized_rows = self._normalize_table_rows(raw_rows)
+                        if not normalized_rows:
+                            continue
+
+                        cell_count = sum(len(r) for r in normalized_rows)
+                        if cell_count < self.table_min_cells:
+                            continue
+
+                        row_count = len(normalized_rows)
+                        col_count = max((len(r) for r in normalized_rows), default=0)
+                        caption = self._select_table_caption(caption_candidates, table_index)
+                        table_text = self._format_table_rows(normalized_rows)
+                        if not table_text:
+                            continue
+
+                        content_parts = []
+                        if caption:
+                            content_parts.append(f"Table caption: {caption}")
+                        content_parts.append("Table content:")
+                        content_parts.append(table_text)
+                        content = "\n".join(content_parts).strip()
+
+                        chunks.append(
+                            ProcessedChunk(
+                                chunk_id=chunk_id,
+                                content=content,
+                                page_number=page_number,
+                                start_char=0,
+                                end_char=len(content),
+                                metadata={
+                                    "filename": filename,
+                                    "source": filename,
+                                    "modality": "table",
+                                    "table_index": table_index,
+                                    "table_caption": caption,
+                                    "table_rows": row_count,
+                                    "table_cols": col_count,
+                                },
+                            )
+                        )
+                        chunk_id += 1
+        except Exception as e:
+            logger.warning(f"Table extraction failed for {filename}: {e}")
+            return []
+
+        return chunks
+
+    def _extract_table_caption_candidates(self, page) -> List[str]:
+        """
+        Extract likely table caption lines from a page.
+
+        Heuristic:
+        - Prefer lines that start with 'Table <id>' / 'TABLE <id>'
+        - Fallback to lines containing 'table'
+        """
+        text = page.extract_text() or ""
+        if not text:
+            return []
+
+        lines = [line.strip() for line in text.split("\n") if line and line.strip()]
+        if not lines:
+            return []
+
+        primary = []
+        secondary = []
+        for line in lines:
+            if re.match(r"^\s*(table|tbl)\s*[\d\.\-:]", line, flags=re.IGNORECASE):
+                primary.append(line)
+            elif "table" in line.lower():
+                secondary.append(line)
+
+        return primary + secondary
+
+    def _select_table_caption(self, candidates: List[str], table_index: int) -> str:
+        """Pick caption candidate by table order on the page."""
+        if not candidates:
+            return ""
+
+        idx = table_index - 1
+        if idx < len(candidates):
+            return candidates[idx]
+
+        return candidates[-1]
+
+    def _normalize_table_rows(self, raw_rows: List[List[Any]]) -> List[List[str]]:
+        """
+        Normalize raw extracted rows:
+        - convert cells to clean strings
+        - drop fully-empty rows
+        - cap row count for prompt/index size control
+        """
+        normalized: List[List[str]] = []
+        for row in raw_rows or []:
+            clean_row = []
+            for cell in row or []:
+                value = str(cell).strip() if cell is not None else ""
+                value = re.sub(r"\s+", " ", value).strip()
+                clean_row.append(value)
+
+            if any(cell for cell in clean_row):
+                normalized.append(clean_row)
+
+            if len(normalized) >= self.table_max_rows:
+                break
+
+        return normalized
+
+    def _format_table_rows(self, rows: List[List[str]]) -> str:
+        """Render normalized table rows as compact markdown-like text."""
+        if not rows:
+            return ""
+
+        width = max((len(r) for r in rows), default=0)
+        if width <= 0:
+            return ""
+
+        rendered = []
+        for row in rows:
+            padded = row + ([""] * (width - len(row)))
+            rendered.append(" | ".join(padded))
+        return "\n".join(rendered)
       
     def _extract_pages(self, file_path: str) -> List[ProcessedPage]:  
         """  

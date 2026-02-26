@@ -79,6 +79,9 @@ class Config:
     PDF_CACHE_DIR: str = os.getenv("PDF_CACHE_DIR", ".cache/pdf")  
     CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1000"))  
     CHUNK_OVERLAP: int = int(os.getenv("CHUNK_OVERLAP", "200"))  
+    PDF_TABLE_EXTRACTION_ENABLED: bool = os.getenv("PDF_TABLE_EXTRACTION_ENABLED", "true").lower() == "true"
+    PDF_TABLE_MIN_CELLS: int = int(os.getenv("PDF_TABLE_MIN_CELLS", "6"))
+    PDF_TABLE_MAX_ROWS: int = int(os.getenv("PDF_TABLE_MAX_ROWS", "60"))
       
     # -------------------------------------------  
     # LLM Generation Configuration  
