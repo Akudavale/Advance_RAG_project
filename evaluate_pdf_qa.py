@@ -5,15 +5,21 @@ Reads configuration and questions from an external JSON file.
 """  
   
 import json  
-import re  
 import sys  
 from pathlib import Path  
 from statistics import mean  
 from typing import Any, Dict, List  
   
 from config.config import Config  
-from src.evaluation.evaluator import Evaluator  
 from src.orchestrator import RAGOrchestrator  
+from src.evaluation import (
+    conciseness_score,
+    load_json_eval_config,
+    normalize_text,
+    run_ragas_metrics,
+    token_f1,
+    validate_qa_set,
+)
   
   
 # ============================================================  
@@ -27,157 +33,6 @@ INPUT_JSON_PATH = r"evaluation_config.json"  # <-- Set this to your JSON file pa
   
   
 # ============================================================  
-# HELPERS  
-# ============================================================  
-  
-def _normalize_text(text: str) -> str:  
-    return " ".join((text or "").strip().lower().split())  
-  
-  
-def _token_f1(prediction: str, reference: str) -> float:  
-    p_tokens = _normalize_text(prediction).split()  
-    r_tokens = _normalize_text(reference).split()  
-  
-    if not p_tokens and not r_tokens:  
-        return 1.0  
-    if not p_tokens or not r_tokens:  
-        return 0.0  
-  
-    p_set = set(p_tokens)  
-    r_set = set(r_tokens)  
-    overlap = len(p_set & r_set)  
-  
-    if overlap == 0:  
-        return 0.0  
-  
-    precision = overlap / len(p_set)  
-    recall = overlap / len(r_set)  
-    return (2 * precision * recall) / (precision + recall)  
-  
-  
-def _conciseness_score(answer: str) -> float:  
-    """Heuristic conciseness score in [0, 1]."""  
-    words = re.findall(r"\w+", answer or "")  
-    word_count = len(words)  
-  
-    if word_count == 0:  
-        return 0.0  
-    if word_count <= 25:  
-        return 0.9  
-    if word_count <= 60:  
-        return 0.8  
-    if word_count <= 120:  
-        return 0.6  
-    if word_count <= 220:  
-        return 0.4  
-    return 0.2  
-  
-  
-def _load_json_config(json_path: str) -> Dict[str, Any]:  
-    """  
-    Load and parse the JSON configuration file.  
-      
-    Expected format:  
-    [  
-        {  
-            "input_pdf_path": "...",  
-            "output_json_path": "...",  
-            "agentic": true,  
-            "top_k": 10,  
-            "rerank_top_k": 5,  
-            "retrieval_mode": "hybrid",  
-            "use_query_rewriting": true,  
-            "force_reprocess": true  # optional, defaults to True  
-        },  
-        { "id": "q1", "question": "...", "ground_truth": "...", ... },  
-        { "id": "q2", "question": "...", "ground_truth": "...", ... },  
-        ...  
-    ]  
-      
-    Returns:  
-        Dict with 'config' and 'qa_set' keys  
-    """  
-    with open(json_path, "r", encoding="utf-8") as f:  
-        data = json.load(f)  
-  
-    if not isinstance(data, list) or len(data) < 2:  
-        raise ValueError(  
-            "JSON must be a list with at least 2 elements: "  
-            "[config_object, question1, question2, ...]"  
-        )  
-  
-    # First element is the configuration  
-    config_obj = data[0]  
-      
-    # Validate required config fields  
-    required_config_fields = ["input_pdf_path", "output_json_path"]  
-    for field in required_config_fields:  
-        if field not in config_obj:  
-            raise ValueError(f"Config object missing required field: '{field}'")  
-  
-    # Extract config with defaults  
-    config = {  
-        "input_pdf_path": config_obj["input_pdf_path"],  
-        "output_json_path": config_obj["output_json_path"],  
-        "agentic": config_obj.get("agentic", True),  
-        "top_k": config_obj.get("top_k", 10),  
-        "rerank_top_k": config_obj.get("rerank_top_k", 5),  
-        "retrieval_mode": config_obj.get("retrieval_mode", "hybrid"),  
-        "use_query_rewriting": config_obj.get("use_query_rewriting", True),  
-        "force_reprocess": config_obj.get("force_reprocess", True),  
-    }  
-  
-    # Remaining elements are QA items  
-    qa_set = data[1:]  
-  
-    return {"config": config, "qa_set": qa_set}  
-  
-  
-def _validate_qa_set(qa_set: List[Dict[str, Any]]) -> List[Dict[str, Any]]:  
-    """  
-    Ensures the QA set follows the expected JSON format.  
-    Required keys:  
-      - id  
-      - question  
-      - ground_truth  
-    Optional keys:  
-      - answer_type  
-      - difficulty  
-      - evidence_topics  
-    """  
-    validated_rows: List[Dict[str, Any]] = []  
-  
-    if not isinstance(qa_set, list):  
-        raise ValueError("QA set must be a list of QA objects")  
-  
-    for i, item in enumerate(qa_set):  
-        if not isinstance(item, dict):  
-            raise ValueError(f"QA set item at index {i} is not a dictionary")  
-  
-        qid = str(item.get("id", f"q{i+1}")).strip()  
-        question = str(item.get("question", "")).strip()  
-        ground_truth = str(item.get("ground_truth", "")).strip()  
-  
-        if not question:  
-            raise ValueError(f"QA set item at index {i} is missing 'question'")  
-        if not ground_truth:  
-            raise ValueError(f"QA set item at index {i} is missing 'ground_truth'")  
-  
-        validated_rows.append(  
-            {  
-                "id": qid,  
-                "question": question,  
-                "ground_truth": ground_truth,  
-                "answer_type": item.get("answer_type"),  
-                "difficulty": item.get("difficulty"),  
-                "evidence_topics": item.get("evidence_topics", []),  
-            }  
-        )  
-  
-    return validated_rows  
-  
-  
-# ============================================================  
 # MAIN  
 # ============================================================  
   
@@ -187,9 +42,9 @@ def run_evaluation(json_path: str) -> None:
     print(f"Loading configuration from: {json_path}")  
       
     # Load and parse JSON  
-    parsed = _load_json_config(json_path)  
+    parsed = load_json_eval_config(json_path)  
     eval_config = parsed["config"]  
-    qa_rows = _validate_qa_set(parsed["qa_set"])  
+    qa_rows = validate_qa_set(parsed["qa_set"])  
   
     # Extract configuration values  
     pdf_path = eval_config["input_pdf_path"]  
@@ -210,8 +65,6 @@ def run_evaluation(json_path: str) -> None:
     # Initialize RAG components  
     cfg = Config()  
     rag = RAGOrchestrator(cfg)  
-    evaluator = Evaluator(cfg)  
-  
     conversation_id = rag.create_conversation()  
   
     # Process document  
@@ -238,6 +91,9 @@ def run_evaluation(json_path: str) -> None:
     completeness_scores: List[float] = []  
     conciseness_scores: List[float] = []  
   
+    ragas_samples: List[Dict[str, Any]] = []
+    ragas_result_indices: List[int] = []
+
     # Process each question  
     for idx, row in enumerate(qa_rows, 1):  
         qid = row["id"]  
@@ -279,29 +135,27 @@ def run_evaluation(json_path: str) -> None:
         prediction = response.get("answer", "")  
         sources = response.get("sources", []) or []  
   
-        eval_results = evaluator.evaluate(  
-            query=question,  
-            answer=prediction,  
-            context=sources,  
-            reference_answer=reference,  
-        )  
+        conciseness = conciseness_score(prediction)  
   
-        relevance = float(eval_results["relevance"].score)  
-        faithfulness = float(eval_results["faithfulness"].score)  
-        completeness = float(eval_results["completeness"].score)  
-        conciseness = _conciseness_score(prediction)  
+        em = 1.0 if normalize_text(prediction) == normalize_text(reference) else 0.0  
+        f1 = token_f1(prediction, reference)  
   
-        em = 1.0 if _normalize_text(prediction) == _normalize_text(reference) else 0.0  
-        f1 = _token_f1(prediction, reference)  
-  
-        relevance_scores.append(relevance)  
-        faithfulness_scores.append(faithfulness)  
-        completeness_scores.append(completeness)  
         conciseness_scores.append(conciseness)  
         em_scores.append(em)  
         f1_scores.append(f1)  
         source_counts.append(len(sources))  
-  
+
+        ragas_samples.append(
+            {
+                "question": question,
+                "answer": prediction,
+                "contexts": [s.get("content", "") for s in sources if s.get("content")],
+                "ground_truth": reference,
+            }
+        )
+
+        ragas_result_indices.append(len(results))
+
         results.append(  
             {  
                 "id": qid,  
@@ -314,24 +168,38 @@ def run_evaluation(json_path: str) -> None:
                 "status": "success",  
                 "exact_match": em,  
                 "token_f1": f1,  
-                "relevance": relevance,  
-                "faithfulness": faithfulness,  
-                "completeness": completeness,  
+                "relevance": None,
+                "faithfulness": None,
+                "completeness": None,
                 "conciseness": conciseness,  
                 "metric_details": {  
-                    "relevance": eval_results["relevance"].details,  
-                    "faithfulness": eval_results["faithfulness"].details,  
-                    "completeness": eval_results["completeness"].details,  
-                    "conciseness": {"method": "heuristic_word_count"},  
+                    "relevance": {"method": "ragas"},
+                    "faithfulness": {"method": "ragas"},
+                    "completeness": {"method": "ragas"},
+                    "conciseness": {"method": "heuristic_word_count"},
                 },  
                 "source_count": len(sources),  
                 "sources": sources,  
                 "response_metadata": response.get("metadata", {}),  
             }  
         )  
-  
-        print(f"  -> Success: relevance={relevance:.2f}, faithfulness={faithfulness:.2f}, "  
-              f"completeness={completeness:.2f}, f1={f1:.2f}")  
+
+        print(f"  -> Success: queued for RAGAS scoring, f1={f1:.2f}")
+
+    if ragas_samples:
+        print("\nRunning RAGAS metrics (faithfulness, relevance, completeness)...")
+        ragas_scores = run_ragas_metrics(ragas_samples, cfg)
+        for i, metric_row in enumerate(ragas_scores):
+            if i >= len(ragas_result_indices):
+                break
+            result_idx = ragas_result_indices[i]
+            results[result_idx]["faithfulness"] = metric_row["faithfulness"]
+            results[result_idx]["relevance"] = metric_row["relevance"]
+            results[result_idx]["completeness"] = metric_row["completeness"]
+
+            faithfulness_scores.append(metric_row["faithfulness"])
+            relevance_scores.append(metric_row["relevance"])
+            completeness_scores.append(metric_row["completeness"])
   
     # Build summary  
     summary = {  
