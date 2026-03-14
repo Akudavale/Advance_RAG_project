@@ -220,7 +220,7 @@ def main(call_config: dict):
                 conversation_id=conversation_id,
                 query=query,
                 use_reranking=True,
-                use_memory=True,
+                use_memory=call_config.get("use_memory", True),
                 use_query_rewriting=call_config.get("use_query_rewriting"),
                 top_k=call_config.get("top_k", 10),
                 rerank_top_k=call_config.get("rerank_top_k", 5),
@@ -229,6 +229,7 @@ def main(call_config: dict):
                 dense_top_k=call_config.get("dense_top_k"),
                 sparse_top_k=call_config.get("sparse_top_k"),
                 hybrid_alpha=call_config.get("hybrid_alpha", 0.5),
+                agentic=call_config.get("agentic", True)
             )
 
             elapsed = time.time() - start_time
@@ -253,14 +254,16 @@ if __name__ == "__main__":
 
     call_config = {
         "PDF_PATHS": [
-            "Abhishek_Master_Thesis_draft_1.pdf",
+            "Abhishek_Master_Thesis_rag.pdf"
             # "resume.pdf"
-            r"C:\\Users\\I012606\\Desktop\\Thesis\\papers\\AD in unstructed environment.pdf"
+            # r"C:\\Users\\I012606\\Desktop\\Thesis\\papers\\AD in unstructed environment.pdf"
         ],
-        "top_k": 20,  # number of top documents to retrieve
-        "rerank_top_k": 10,  # number of top documents to re-rank
+        "agentic": False,  # Enable agentic capabilities (tool use)
+        "use_memory": False,  # Enable conversation memory
+        "top_k": 50,  # number of top documents to retrieve
+        "rerank_top_k": 30,  # number of top documents to re-rank
         "use_query_rewriting": True,  # Enable query re-writing
-        "method": "expand",  # query re-write method: "hyde" , "expand", "multi", "decompose"
+        "method": "hyde",  # query re-write method: "hyde" , "expand", "multi", "decompose"
         "retrieval_mode": "hybrid",  # "vector", "bm25", "hybrid"
         "dense_top_k": 20,
         "sparse_top_k": 20,

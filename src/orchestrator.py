@@ -45,8 +45,9 @@ class RAGOrchestrator:
         self._reranker = None  
         self._query_rewriter = None  
         self._conversation_memory = None  
+        self._persistent_memory = None  
           
-        # Conversation storage  
+        # Conversation storage (in-memory cache for quick access)  
         self._conversations: Dict[str, Dict[str, Any]] = {}  
           
         # Document tracking (maps conversation_id -> list of filenames)  
@@ -146,6 +147,14 @@ class RAGOrchestrator:
             from src.memory.conversation_memory import ConversationMemory  
             self._conversation_memory = ConversationMemory(self.config)  
         return self._conversation_memory  
+    
+    @property
+    def persistent_memory(self):
+        """Lazy load persistent memory (PostgreSQL + Redis)."""
+        if self._persistent_memory is None:
+            from src.persistence.persistent_memory import get_persistent_memory
+            self._persistent_memory = get_persistent_memory()
+        return self._persistent_memory  
       
     # -------------------------------------------  
     # Conversation management  
@@ -160,6 +169,16 @@ class RAGOrchestrator:
         """  
         conversation_id = str(uuid.uuid4())  
           
+        # Store in persistent memory  
+        try:
+            self.persistent_memory.create_conversation(
+                conversation_id=conversation_id,
+                metadata={"created_via": "orchestrator"}
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create conversation in persistent storage: {e}")
+          
+        # Also maintain in-memory cache for quick access  
         self._conversations[conversation_id] = {  
             "id": conversation_id,  
             "created_at": datetime.now().isoformat(),  
@@ -218,7 +237,7 @@ class RAGOrchestrator:
       
     def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:  
         """  
-        Get conversation history.  
+        Get conversation history (from persistent storage with in-memory fallback).  
           
         Args:  
             conversation_id: The conversation ID  
@@ -226,6 +245,29 @@ class RAGOrchestrator:
         Returns:  
             Conversation data or error  
         """  
+        # Try persistent memory first  
+        try:
+            messages = self.persistent_memory.get_recent_messages(
+                conversation_id=conversation_id,
+                limit=50
+            )
+            if messages:
+                # Convert to conversation format for backward compatibility
+                conv_data = {
+                    "id": conversation_id,
+                    "messages": messages,
+                    "documents": self._conversation_documents.get(conversation_id, [])
+                }
+                # Update in-memory cache
+                self._conversations[conversation_id] = conv_data
+                return {
+                    "status": "success",
+                    "conversation": conv_data
+                }
+        except Exception as e:
+            logger.warning(f"Failed to retrieve conversation from persistent storage: {e}")
+        
+        # Fall back to in-memory cache  
         if conversation_id not in self._conversations:  
             return {  
                 "status": "error",  
@@ -521,20 +563,41 @@ class RAGOrchestrator:
                 conversation_history=conversation_context if use_memory else None,
             )
               
-            # Store in conversation  
+            # Store in persistent memory and in-memory cache  
             if conversation_id:  
                 self._ensure_conversation(conversation_id)
-                  
-                self._conversations[conversation_id]["messages"].append({  
+                
+                # Store user message
+                user_msg = {
                     "role": "user",  
                     "content": original_query,  
                     "timestamp": datetime.now().isoformat()  
-                })  
-                self._conversations[conversation_id]["messages"].append({  
+                }
+                try:
+                    self.persistent_memory.add_message(
+                        conversation_id=conversation_id,
+                        role="user",
+                        content=original_query
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to store user message in persistent storage: {e}")
+                self._conversations[conversation_id]["messages"].append(user_msg)
+                
+                # Store assistant message
+                assistant_msg = {
                     "role": "assistant",  
                     "content": answer,  
                     "timestamp": datetime.now().isoformat()  
-                })  
+                }
+                try:
+                    self.persistent_memory.add_message(
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content=answer
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to store assistant message in persistent storage: {e}")
+                self._conversations[conversation_id]["messages"].append(assistant_msg)  
               
             # Prepare sources for response  
             sources = []  
@@ -644,20 +707,37 @@ class RAGOrchestrator:
         if conversation_id:
             self._ensure_conversation(conversation_id)
 
-            self._conversations[conversation_id]["messages"].append(
-                {
-                    "role": "user",
-                    "content": original_query,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
-            self._conversations[conversation_id]["messages"].append(
-                {
-                    "role": "assistant",
-                    "content": answer,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
+            # Store user message in persistent memory and in-memory cache
+            user_msg = {
+                "role": "user",
+                "content": original_query,
+                "timestamp": datetime.now().isoformat(),
+            }
+            try:
+                self.persistent_memory.add_message(
+                    conversation_id=conversation_id,
+                    role="user",
+                    content=original_query
+                )
+            except Exception as e:
+                logger.warning(f"Failed to store user message in persistent storage: {e}")
+            self._conversations[conversation_id]["messages"].append(user_msg)
+            
+            # Store assistant message in persistent memory and in-memory cache
+            assistant_msg = {
+                "role": "assistant",
+                "content": answer,
+                "timestamp": datetime.now().isoformat(),
+            }
+            try:
+                self.persistent_memory.add_message(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=answer
+                )
+            except Exception as e:
+                logger.warning(f"Failed to store assistant message in persistent storage: {e}")
+            self._conversations[conversation_id]["messages"].append(assistant_msg)
 
         for doc in context_docs:
             content = doc["content"]

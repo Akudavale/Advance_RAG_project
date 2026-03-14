@@ -96,6 +96,36 @@ class Config:
     MAX_HISTORY_TURNS: int = int(os.getenv("MAX_HISTORY_TURNS", "5"))  
     MAX_CHARS_PER_DOC: int = int(os.getenv("MAX_CHARS_PER_DOC", "1500"))  
     PROMPTS_DIR: str = os.getenv("PROMPTS_DIR", "src/prompts/templates")  
+    
+    # -------------------------------------------
+    # Database (PostgreSQL) Configuration
+    # -------------------------------------------
+    DB_URL: str = os.getenv(
+        "DB_URL",
+        os.getenv(
+            "DATABASE_URL",
+            "postgresql://postgres:password@localhost:5432/rag_db"
+        )
+    )
+    DB_ECHO: bool = os.getenv("DB_ECHO", "false").lower() == "true"
+    DB_POOL_DISABLED: bool = os.getenv("DB_POOL_DISABLED", "false").lower() == "true"
+    ENABLE_POSTGRES: bool = os.getenv("ENABLE_POSTGRES", "true").lower() == "true"
+    
+    # -------------------------------------------
+    # Redis (Cache) Configuration
+    # -------------------------------------------
+    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
+    REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
+    REDIS_DEFAULT_TTL: int = int(os.getenv("REDIS_DEFAULT_TTL", "3600"))  # 1 hour
+    ENABLE_REDIS: bool = os.getenv("ENABLE_REDIS", "true").lower() == "true"
+    
+    # Memory configuration
+    MAX_TOKEN_LIMIT: int = int(os.getenv("MAX_TOKEN_LIMIT", "4000"))
+    MAX_CONVERSATION_TURNS: int = int(os.getenv("MAX_CONVERSATION_TURNS", "50"))
+    MAX_RECENT_TURNS: int = int(os.getenv("MAX_RECENT_TURNS", "10"))  # For Redis cache
+    SUMMARY_THRESHOLD_TOKENS: int = int(os.getenv("SUMMARY_THRESHOLD_TOKENS", "2000"))
       
     def __init__(self):  
         """Initialize configuration."""  
@@ -215,3 +245,30 @@ class Config:
             f"embedding={self.EMBEDDING_MODEL}, "  
             f"reranker={self.RERANKER_MODEL})"  
         )  
+    
+    @staticmethod
+    def _mask_url(url: str) -> str:
+        """
+        Mask password in database URL for logging.
+        
+        Converts: postgresql://user:password@host:5432/db
+        To:       postgresql://user:***@host:5432/db
+        
+        Args:
+            url: Database URL string
+            
+        Returns:
+            Masked URL with password replaced by ***
+        """
+        if "@" in url:
+            try:
+                scheme_rest = url.split("://", 1)
+                if len(scheme_rest) != 2:
+                    return url
+                scheme, rest = scheme_rest
+                user_pass, host_db = rest.split("@", 1)
+                user = user_pass.split(":")[0] if ":" in user_pass else user_pass
+                return f"{scheme}://{user}:***@{host_db}"
+            except Exception:
+                return url
+        return url  

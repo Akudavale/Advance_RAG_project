@@ -124,6 +124,7 @@ pre_commit==4.5.1
 propcache==0.4.1
 proto-plus==1.27.1
 protobuf==6.33.5
+psycopg2-binary==2.9.10
 pyarrow==23.0.1
 pyasn1==0.6.2
 pyasn1_modules==0.4.2
@@ -148,6 +149,7 @@ ragas==0.3.9
 rank-bm25==0.2.2
 referencing==0.37.0
 regex==2026.2.19
+redis==5.0.1
 requests==2.32.5
 requests-oauthlib==2.0.0
 requests-toolbelt==1.0.0
