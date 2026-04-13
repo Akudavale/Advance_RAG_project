@@ -108,34 +108,20 @@ class APIClient:
         return {}
     
     def login(self, username: str, password: str) -> bool:
-        """Login to the API and get a token."""
-        try:
-            response = requests.post(
-                f"{self.base_url}/token",
-                data={
-                    "username": username,
-                    "password": password,
-                    "scope": "read:conversations write:conversations"
-                }
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                self.token = data["access_token"]
-                self.username = data["username"]
-                # Calculate token expiry time
-                expires_at = data.get("expires_at")
-                if expires_at:
-                    self.token_expiry = datetime.fromtimestamp(expires_at)
-                else:
-                    # Default to 30 minutes
-                    self.token_expiry = datetime.now() + timedelta(minutes=30)
-                return True
-            else:
-                return False
-        except Exception as e:
-            logger.error(f"Login failed: {e}")
-            return False
+        """Login stub.
+
+        The current backend does not implement authentication or a /token
+        endpoint. This method always returns True to keep the UI flow
+        simple when AUTH is enabled.
+        """
+        logger.info("Login called, but authentication is not implemented on the API.\n"
+                    "Proceeding without real auth.")
+        self.username = username
+        # No real token management – backend doesn't require auth
+        self.token = None
+        self.token_expiry = None
+        return True
+
     
     def upload_pdf(self, file, conversation_id: str = None) -> Dict[str, Any]:
         """Upload a PDF file to the API."""
@@ -258,22 +244,46 @@ class APIClient:
             return {"status": "error", "message": str(e)}
     
     def get_system_performance(self) -> Dict[str, Any]:
-        """Get system performance metrics."""
+        """Get system performance metrics.
+
+        Backend currently exposes /stats which returns basic stats from
+        the orchestrator. This method adapts that response into the
+        shape expected by the UI where possible.
+        """
         try:
             response = requests.get(
-                f"{self.base_url}/system_performance",
-                headers=self.get_headers()
+                f"{self.base_url}/stats",
+                headers=self.get_headers(),
             )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
+
+            if response.status_code != 200:
                 logger.error(f"Failed to get system performance: {response.text}")
                 return {"status": "error", "message": f"Failed to get performance data: {response.text}"}
-                
+
+            raw = response.json() or {}
+
+            # Adapt minimal /stats into richer structure expected by UI
+            conv_count = raw.get("conversations", 0)
+            documents = raw.get("vector_store", {}).get("documents", 0)
+
+            return {
+                "conversations": conv_count,
+                "documents": documents,
+                # Messages and scores are not tracked today; keep defaults
+                "messages": 0,
+                "average_scores": {
+                    "overall": 0.0,
+                    "faithfulness": 0.0,
+                    "relevance": 0.0,
+                    "answer_relevancy": 0.0,
+                },
+                "improvement_suggestions": [],
+                "problematic_queries": [],
+            }
         except Exception as e:
             logger.error(f"Error getting performance data: {e}")
             return {"status": "error", "message": str(e)}
+
     
     def submit_feedback(self, query: str, response: str, 
                         score: float, feedback_text: str = None) -> Dict[str, Any]:
@@ -333,7 +343,9 @@ def initialize_session_state():
             "agent_max_steps": 3,
             "retrieval_mode": "hybrid",
             "hybrid_alpha": 0.5,
-            "stream_responses": True,
+            # Backend does not implement streaming; default to False
+            "stream_responses": False,
+
             "show_sources": True,
             "show_metrics": False,
             "dark_mode": ENABLE_DARK_MODE,
