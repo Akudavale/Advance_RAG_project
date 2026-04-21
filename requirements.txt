@@ -147,9 +147,9 @@ pytz==2025.2
 PyYAML==6.0.3
 ragas==0.3.9
 rank-bm25==0.2.2
+redis==5.0.1
 referencing==0.37.0
 regex==2026.2.19
-redis==5.0.1
 requests==2.32.5
 requests-oauthlib==2.0.0
 requests-toolbelt==1.0.0
